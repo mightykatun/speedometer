@@ -2,7 +2,7 @@
 
 Releases are created by `.github/workflows/release.yml` whenever a `v*` tag is pushed.
 
-The tag must match `versionName` in `app/build.gradle.kts`. For example, `versionName = "1.2.0"` requires tag `v1.2.0`.
+The tag must match `versionName` in `app/build.gradle.kts`. For example, `versionName = "1.2.1"` requires tag `v1.2.1`.
 
 Every release contains:
 
@@ -30,6 +30,8 @@ With none of the secrets present, the workflow builds an installable debug-signe
 1. Update `versionCode` and `versionName` in `app/build.gradle.kts`.
 2. Run `./gradlew clean test lint assembleDebug`.
 3. Commit the release changes.
-4. Create the matching annotated tag, for example `git tag -a v1.2.0 -m "Speedometer v1.2.0"`.
+4. Create the matching annotated tag, for example `git tag -a v1.2.1 -m "Speedometer v1.2.1"`.
 5. Push the commit and tag.
 6. Verify the workflow and download each published asset.
+
+An existing tag can be republished manually from the Actions page or with `gh workflow run Release --ref main -f tag=vX.Y.Z`.

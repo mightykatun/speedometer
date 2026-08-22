@@ -4,18 +4,25 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
     env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
       RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
       RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
@@ -23,9 +30,10 @@ jobs:
 
     steps:
       - name: Check out release commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Validate tag and app version
         shell: bash
@@ -33,10 +41,10 @@ jobs:
           set -euo pipefail
           version_name="$(perl -ne 'print $1 if /versionName = "([^"]+)"/' app/build.gradle.kts)"
           test -n "$version_name"
-          test "$GITHUB_REF_NAME" = "v$version_name"
+          test "$RELEASE_TAG" = "v$version_name"
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
@@ -47,9 +55,6 @@ jobs:
       - name: Install Android SDK packages
         shell: bash
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
 
       - name: Select signing mode
         id: build
@@ -99,19 +104,19 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          artifact_name="speedometer-${GITHUB_REF_NAME}${{ steps.build.outputs.suffix }}.apk"
+          artifact_name="speedometer-${RELEASE_TAG}${{ steps.build.outputs.suffix }}.apk"
           cp "${{ steps.build.outputs.apk }}" "dist/$artifact_name"
           git archive \
             --format=zip \
-            --prefix="speedometer-${GITHUB_REF_NAME}/" \
-            --output="dist/speedometer-${GITHUB_REF_NAME}-source.zip" \
-            "$GITHUB_SHA"
+            --prefix="speedometer-${RELEASE_TAG}/" \
+            --output="dist/speedometer-${RELEASE_TAG}-source.zip" \
+            HEAD
           (cd dist && sha256sum *.apk *.zip > SHA256SUMS.txt)
 
       - name: Preserve workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: speedometer-${{ github.ref_name }}
+          name: speedometer-${{ env.RELEASE_TAG }}
           path: dist/
           if-no-files-found: error
 
@@ -121,12 +126,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          flags=(--verify-tag --generate-notes --title "Speedometer $GITHUB_REF_NAME")
+          flags=(--verify-tag --generate-notes --title "Speedometer $RELEASE_TAG")
           if test "${{ steps.build.outputs.prerelease }}" = "true"; then
             flags+=(--prerelease)
           fi
           gh release create \
-            "$GITHUB_REF_NAME" \
+            "$RELEASE_TAG" \
             dist/*.apk \
             dist/*.zip \
             dist/SHA256SUMS.txt \
