@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+      RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+      RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+      RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+
+    steps:
+      - name: Check out release commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag and app version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version_name="$(perl -ne 'print $1 if /versionName = "([^"]+)"/' app/build.gradle.kts)"
+          test -n "$version_name"
+          test "$GITHUB_REF_NAME" = "v$version_name"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Select signing mode
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          configured=0
+          for value in \
+            "$RELEASE_KEYSTORE_BASE64" \
+            "$RELEASE_KEY_ALIAS" \
+            "$RELEASE_KEY_PASSWORD" \
+            "$RELEASE_STORE_PASSWORD"; do
+            if test -n "$value"; then
+              configured=$((configured + 1))
+            fi
+          done
+
+          if test "$configured" -eq 0; then
+            echo "No signing secrets found; creating a debug-signed test prerelease."
+            echo "task=assembleDebug" >> "$GITHUB_OUTPUT"
+            echo "apk=app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_OUTPUT"
+            echo "suffix=-test" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          elif test "$configured" -eq 4; then
+            printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > app/release-key.jks
+            {
+              printf 'keyAlias=%s\n' "$RELEASE_KEY_ALIAS"
+              printf 'keyPassword=%s\n' "$RELEASE_KEY_PASSWORD"
+              printf 'storeFile=release-key.jks\n'
+              printf 'storePassword=%s\n' "$RELEASE_STORE_PASSWORD"
+            } > keystore.properties
+            echo "task=assembleRelease" >> "$GITHUB_OUTPUT"
+            echo "apk=app/build/outputs/apk/release/app-release.apk" >> "$GITHUB_OUTPUT"
+            echo "suffix=" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Signing is partially configured; set all four release secrets or remove them all." >&2
+            exit 1
+          fi
+
+      - name: Test, lint, and build
+        shell: bash
+        run: ./gradlew clean test lint "${{ steps.build.outputs.task }}"
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          artifact_name="speedometer-${GITHUB_REF_NAME}${{ steps.build.outputs.suffix }}.apk"
+          cp "${{ steps.build.outputs.apk }}" "dist/$artifact_name"
+          git archive \
+            --format=zip \
+            --prefix="speedometer-${GITHUB_REF_NAME}/" \
+            --output="dist/speedometer-${GITHUB_REF_NAME}-source.zip" \
+            "$GITHUB_SHA"
+          (cd dist && sha256sum *.apk *.zip > SHA256SUMS.txt)
+
+      - name: Preserve workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: speedometer-${{ github.ref_name }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          flags=(--verify-tag --generate-notes --title "Speedometer $GITHUB_REF_NAME")
+          if test "${{ steps.build.outputs.prerelease }}" = "true"; then
+            flags+=(--prerelease)
+          fi
+          gh release create \
+            "$GITHUB_REF_NAME" \
+            dist/*.apk \
+            dist/*.zip \
+            dist/SHA256SUMS.txt \
+            "${flags[@]}" \
+            --repo "$GITHUB_REPOSITORY"

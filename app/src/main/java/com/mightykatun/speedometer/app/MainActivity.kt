@@ -7,7 +7,6 @@ import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
-import android.os.SystemClock
 import android.util.Rational
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -17,6 +16,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -31,29 +31,24 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
-import androidx.lifecycle.lifecycleScope
 
-import com.mightykatun.speedometer.app.data.repository.LocationRepositoryImpl
+import com.mightykatun.speedometer.app.data.repository.SpeedRepositoryImpl
 import com.mightykatun.speedometer.app.di.SpeedometerViewModelFactory
-import com.mightykatun.speedometer.app.domain.model.GpsReading
+import com.mightykatun.speedometer.app.domain.model.EstimateQuality
 import com.mightykatun.speedometer.app.domain.model.SpeedUnit
 import com.mightykatun.speedometer.app.domain.model.SpeedometerState
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
+import com.mightykatun.speedometer.app.domain.model.TrackingMode
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
 
     private val viewModel: SpeedometerViewModel by viewModels { SpeedometerViewModelFactory.INSTANCE }
     
-    private lateinit var locationRepository: LocationRepositoryImpl
-    private var watchdogJob: Job? = null
-    private var lastFixTime: Long = 0L
+    private lateinit var speedRepository: SpeedRepositoryImpl
 
     private var isInPipMode by mutableStateOf(false)
     private var speedUnit by mutableStateOf(SpeedUnit.KILOMETERS_PER_HOUR)
+    private var trackingMode by mutableStateOf(TrackingMode.HANDHELD)
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -62,9 +57,7 @@ class MainActivity : ComponentActivity() {
         val coarseLocation = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] ?: false
 
         if (fineLocation) {
-            lifecycleScope.launch {
-                startLocationTracking()
-            }
+            startSpeedTracking()
         } else {
             viewModel.onError(if (coarseLocation) {
                 "Precise Location required for GPS speed accuracy.\nPlease allow 'Precise' in settings."
@@ -76,11 +69,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        locationRepository = LocationRepositoryImpl(this)
-        speedUnit = SpeedUnit.fromPreference(
-            getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
-                .getString(SPEED_UNIT_KEY, null)
-        )
+        speedRepository = SpeedRepositoryImpl(this)
+        val preferences = getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+        speedUnit = SpeedUnit.fromPreference(preferences.getString(SPEED_UNIT_KEY, null))
+        trackingMode = TrackingMode.fromPreference(preferences.getString(TRACKING_MODE_KEY, null))
+            .takeIf { it != TrackingMode.FIXED || speedRepository.supportsFixedMode }
+            ?: TrackingMode.HANDHELD
         
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) 
             != PackageManager.PERMISSION_GRANTED) {
@@ -98,7 +92,10 @@ class MainActivity : ComponentActivity() {
                 error = viewModel.errorMessage,
                 isInPipMode = isInPipMode,
                 speedUnit = speedUnit,
+                trackingMode = trackingMode,
+                supportsFixedMode = speedRepository.supportsFixedMode,
                 onSpeedUnitClick = { cycleSpeedUnit() },
+                onTrackingModeChange = { changeTrackingMode(it) },
                 onEnterPip = { enterPipMode() }
             )
         }
@@ -128,74 +125,60 @@ class MainActivity : ComponentActivity() {
             .apply()
     }
 
+    private fun changeTrackingMode(useFixedMode: Boolean) {
+        trackingMode = if (useFixedMode && speedRepository.supportsFixedMode) {
+            TrackingMode.FIXED
+        } else {
+            TrackingMode.HANDHELD
+        }
+        getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(TRACKING_MODE_KEY, trackingMode.preferenceValue)
+            .apply()
+        speedRepository.setTrackingMode(trackingMode)
+    }
+
     override fun onStart() {
         super.onStart()
-        checkPermissionsAndStart()
-        startWatchdog()
         viewModel.onSessionStart()
+        checkPermissionsAndStart()
     }
 
     override fun onStop() {
         super.onStop()
-        stopLocationTracking()
-        stopWatchdog()
+        speedRepository.stopUpdates()
 
         if (!isChangingConfigurations) {
             viewModel.onSessionReset()
         }
     }
 
-    private fun startWatchdog() {
-        watchdogJob?.cancel()
-        watchdogJob = lifecycleScope.launch {
-            while (isActive) {
-                delay(1000)
-                val timeSinceLastFix = SystemClock.elapsedRealtime() - lastFixTime
-                if (lastFixTime > 0 && timeSinceLastFix > 2000 && viewModel.state.currentSpeedKmh > 0) {
-                    val fakeReading = GpsReading(0f, null, viewModel.state.satelliteCount, SystemClock.elapsedRealtime())
-                    viewModel.onGpsReadingReceived(fakeReading)
-                }
-            }
-        }
-    }
-
-    private fun stopWatchdog() {
-        watchdogJob?.cancel()
-        watchdogJob = null
+    override fun onDestroy() {
+        speedRepository.close()
+        super.onDestroy()
     }
 
     private fun checkPermissionsAndStart() {
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) 
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
             == PackageManager.PERMISSION_GRANTED) {
-            lifecycleScope.launch {
-                startLocationTracking()
-            }
+            startSpeedTracking()
         }
     }
 
-    private suspend fun startLocationTracking() {
-        locationRepository.startLocationUpdates(
-            onReadingUpdate = { reading ->
-                lastFixTime = reading.timestamp
-                viewModel.onGpsReadingReceived(reading)
-            },
-            onGpsError = { error ->
-                if (error != null) {
-                    viewModel.onError(error)
-                }
-            }
+    private fun startSpeedTracking() {
+        speedRepository.startUpdates(
+            trackingMode = trackingMode,
+            onEstimate = viewModel::onSpeedEstimateReceived,
+            onSatelliteCount = viewModel::onSatelliteCountReceived,
+            onGnssAvailable = viewModel::onGpsAvailable,
+            onError = viewModel::onError
         )
-    }
-
-    private fun stopLocationTracking() {
-        lifecycleScope.launch {
-            locationRepository.stopLocationUpdates()
-        }
     }
 
     private companion object {
         const val PREFERENCES_NAME = "speedometer_preferences"
         const val SPEED_UNIT_KEY = "speed_unit"
+        const val TRACKING_MODE_KEY = "tracking_mode"
     }
 }
 
@@ -205,7 +188,10 @@ fun SpeedometerScreen(
     error: String?,
     isInPipMode: Boolean,
     speedUnit: SpeedUnit,
+    trackingMode: TrackingMode,
+    supportsFixedMode: Boolean,
     onSpeedUnitClick: () -> Unit,
+    onTrackingModeChange: (Boolean) -> Unit,
     onEnterPip: () -> Unit
 ) {
     val isDark = isSystemInDarkTheme()
@@ -218,7 +204,8 @@ fun SpeedometerScreen(
     val pipContentColor = if (isDark) Color.White else Color.Black
 
     val statusColor = if (state.satelliteCount >= 3) Color.Green else Color.Red
-    val currentSpeed = speedUnit.fromKilometersPerHour(state.currentSpeedKmh)
+    val currentSpeed = state.currentSpeedKmh?.let(speedUnit::fromKilometersPerHour)
+    val currentAccuracy = state.speedAccuracyKmh?.let(speedUnit::fromKilometersPerHour)
     val maxSpeed = speedUnit.fromKilometersPerHour(state.maxSpeedKmh)
 
     // Adjust font sizes for PiP mode
@@ -268,6 +255,33 @@ fun SpeedometerScreen(
                         fontSize = 16.sp
                     )
                 }
+
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .heightIn(min = 48.dp)
+                        .toggleable(
+                            value = trackingMode == TrackingMode.FIXED,
+                            enabled = supportsFixedMode,
+                            role = Role.Switch,
+                            onValueChange = onTrackingModeChange
+                        ),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "mode: ",
+                        color = labelColor,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        fontSize = 14.sp
+                    )
+                    Text(
+                        text = if (trackingMode == TrackingMode.FIXED) "fixed" else "handheld",
+                        color = if (supportsFixedMode) primaryColor else labelColor,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
+                }
             }
 
             // --- CENTER: Speedometer ---
@@ -275,10 +289,10 @@ fun SpeedometerScreen(
                 modifier = Modifier.align(Alignment.Center),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                val formattedSpeed = "%.2f".format(Locale.US, currentSpeed)
-                val parts = formattedSpeed.split(".")
-                val intPart = parts[0]
-                val decPart = if (parts.size > 1) parts[1] else "00"
+                val formattedSpeed = currentSpeed?.let { "%.2f".format(Locale.US, it) }
+                val parts = formattedSpeed?.split(".")
+                val intPart = parts?.get(0) ?: "--"
+                val decPart = parts?.getOrNull(1)
 
                 Row {
                     // Integer Part
@@ -294,17 +308,19 @@ fun SpeedometerScreen(
                     )
                     
                     // Decimal Part
-                    Text(
-                        text = ".$decPart",
-                        style = MaterialTheme.typography.headlineMedium.copy(
-                            fontSize = decimalSize,
-                            fontWeight = FontWeight.Bold,
-                            color = secondaryColor
-                        ),
-                        modifier = Modifier
-                            .alignByBaseline()
-                            .padding(start = 2.dp)
-                    )
+                    if (decPart != null) {
+                        Text(
+                            text = ".$decPart",
+                            style = MaterialTheme.typography.headlineMedium.copy(
+                                fontSize = decimalSize,
+                                fontWeight = FontWeight.Bold,
+                                color = secondaryColor
+                            ),
+                            modifier = Modifier
+                                .alignByBaseline()
+                                .padding(start = 2.dp)
+                        )
+                    }
 
                     Spacer(modifier = Modifier.width(4.dp))
 
@@ -324,6 +340,14 @@ fun SpeedometerScreen(
                             )
                     )
                 }
+
+                AccuracyIndicator(
+                    quality = state.estimateQuality,
+                    accuracy = currentAccuracy,
+                    unit = speedUnit.label,
+                    isInPipMode = isInPipMode,
+                    labelColor = labelColor
+                )
             }
 
             if (!isInPipMode) {
@@ -352,6 +376,48 @@ fun SpeedometerScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun AccuracyIndicator(
+    quality: EstimateQuality,
+    accuracy: Float?,
+    unit: String,
+    isInPipMode: Boolean,
+    labelColor: Color
+) {
+    val color = when (quality) {
+        EstimateQuality.TRACKING -> Color.Green
+        EstimateQuality.DEGRADED -> Color(0xFFFFA000)
+        EstimateQuality.ACQUIRING -> labelColor
+        EstimateQuality.UNAVAILABLE -> Color.Red
+    }
+    val text = when (quality) {
+        EstimateQuality.TRACKING, EstimateQuality.DEGRADED ->
+            accuracy?.let { "+/- %.1f %s".format(Locale.US, it, unit) } ?: "estimating"
+        EstimateQuality.ACQUIRING -> "gps..."
+        EstimateQuality.UNAVAILABLE -> "no signal"
+    }
+
+    Row(
+        modifier = Modifier.padding(top = if (isInPipMode) 2.dp else 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(if (isInPipMode) 6.dp else 8.dp)
+                .background(color, androidx.compose.foundation.shape.CircleShape)
+        )
+        if (!isInPipMode) {
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = text,
+                color = color,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                fontSize = 13.sp
+            )
         }
     }
 }

@@ -1,416 +1,245 @@
-# GPS Speedometer - Product Requirements & UX Documentation
+# Speedometer - Product and Engineering Documentation
 
 ## Overview
 
-- **App Name:** Speedometer
+- **App:** Speedometer
 - **Package:** `com.mightykatun.speedometer.app`
-- **Type:** Native Android application
-- **Core Function:** Real-time GPS-based speedometer with HUD interface for drivers
+- **Platform:** Native Android, min SDK 24, target SDK 35
+- **Purpose:** Privacy-focused, accuracy-aware vehicle speed display
+- **Network access:** None
 
----
+The app uses Android GNSS speed as its absolute speed source. In fixed mode, Android's linear-acceleration and rotation-vector sensors provide bounded short-term prediction between GNSS fixes. Inertial data never replaces GNSS indefinitely.
 
-## 1. Information Architecture
+## Screen
 
-### App Structure
+The app remains a single-screen HUD with no navigation graph.
 
-This is a **single-screen utility app** with no traditional navigation. It displays real-time speed data with a minimalist HUD-style interface.
+### Top Left
 
-```
-User launches app
-       ↓
-MainActivity
-       ↓
-Check/request location permissions
-       ↓
-SpeedometerScreen (Compose UI)
-       ↓
-GPS location updates via LocationRepository
-       ↓
-SpeedometerViewModel (state management)
-```
+- Satellites used in the current GNSS fix
+- Green at three or more satellites, red below three
+- Satellite count is status information, not a speed-accuracy measurement
 
-### Navigation Elements
+### Top Right
 
-- **None** — No menus, tabs, or navigation graph
-- **Single entry point:** MainActivity is the launcher activity
-- **No settings screen** — App is "fire and forget"
-- **Picture-in-Picture (PiP) mode** — Overlay support for multitasking
+- Persisted text-only `handheld` / `fixed` switch matching the HUD labels
+- Defaults to handheld
+- Disabled when the device lacks either linear acceleration or rotation-vector sensors
+- Hidden in Picture-in-Picture mode
 
----
+### Center
 
-## 2. Screen Inventory
+- Current speed to two decimal places
+- Tap the unit to cycle km/h, mph, knots, and m/s
+- Low speeds remain visible; there is no 1.5 km/h display floor
+- `--` means speed is not currently defensible
+- A small colored dot and compact `+/- value unit` line report estimator quality and one-standard-deviation uncertainty
 
-### Screen: SpeedometerScreen (Main UI)
+Accuracy states:
 
-**Type:** Jetpack Compose screen (fullscreen)  
-**Purpose:** Display real-time GPS speed with session statistics
+| State | Indicator | Meaning |
+|---|---|---|
+| Tracking | Green | Recent GNSS correction and bounded uncertainty |
+| Estimated | Amber | Number is available but uncertainty or fix age is elevated |
+| Acquiring GPS | Gray | No valid speed seed yet |
+| Speed unavailable | Red | Last trustworthy GNSS correction is too old |
 
-#### Visual Layout (Top to Bottom)
+### Bottom
 
-**A. Satellite Status (Top Left)**
-- Green/Red dot indicator (12dp circle)
-- Text: `satellites: N` (monospace font, 16sp)
-- Color: Green when ≥3 satellites, Red when <3
+- Top speed records only high-confidence estimates after the five-second warmup and with at least three satellites
+- Top satellites tracks the session maximum independently
+- `float` enters Picture-in-Picture on Android 8+
 
-**B. Speed Display (Center)**
-- Large speed number split into integer + decimal parts
-- Integer part: 120sp bold, large letter-spacing (-4sp)
-- Decimal part: `.XX` in 40sp, secondary color
-- Unit: `km/h`, `mph`, `kn`, or `m/s` in 24sp, tertiary color
-- Tapping the unit cycles formats and remembers the selection
+## Tracking Modes
 
-**C. Statistics Area (Bottom Left)**
-- `top speed: X.X unit` — tracked maximum speed in the selected unit
-- `top satellites: N` — highest satellite count seen
+### Handheld
 
-**D. PiP Button (Bottom Right)**
-- Button labeled "float"
-- Opens Picture-in-Picture mode (Android O+)
-- Uses `PictureInPictureParams.Builder` with 16:9 aspect ratio
+Handheld mode is the safe default. It confidence-weights GNSS speed and ignores all IMU input because hand movement cannot be separated reliably from vehicle acceleration.
 
-#### PiP Mode Layout
+### Fixed
 
-When in Picture-in-Picture:
-- Speed display scales down: main=64sp, decimal=24sp, unit=14sp
-- Satellite status and stats areas are hidden
-- Minimal overlay showing just the speed reading
+Fixed mode assumes the phone is rigidly mounted. It:
 
-#### Color Scheme (Dark/Light Theme Aware)
+1. Uses `TYPE_ROTATION_VECTOR` to transform device acceleration into magnetic East/North/Up.
+2. Anchors travel direction with a quality-gated GNSS bearing and local magnetic declination.
+3. Tracks turns between GNSS fixes from relative yaw change.
+4. Projects horizontal acceleration along the current travel direction.
+5. Predicts speed and acceleration bias between GNSS corrections.
+6. Falls back to GNSS-only whenever orientation, course, timestamp, or sensor quality is inadequate.
 
-| Element | Dark Theme | Light Theme |
-|---------|------------|-------------|
-| Background | Black | White |
-| Primary (speed integer) | White | Black |
-| Secondary (decimal) | LightGray | DarkGray |
-| Tertiary (unit) | Gray | Gray |
-| Label text | Gray | DarkGray |
-| PiP button container | Gray | LightGray |
-| PiP button text | White | Black |
-| Satellite indicator | Green (≥3) / Red (<3) | Same |
+Fixed mode does not promise tunnel navigation. Inertial propagation is limited to three seconds because consumer accelerometer bias creates rapidly growing velocity error.
 
----
+## Data Pipeline
 
-## 3. User Interactions & Flows
-
-### Flow 1: First Launch
-
-```
-1. User taps "Speedometer" icon
-2. MainActivity.onCreate() initializes:
-   - SpeedometerViewModel via ViewModelFactory
-   - LocationRepositoryImpl instance
-3. Permission check:
-   - If not granted: Request ACCESS_FINE_LOCATION + ACCESS_COARSE_LOCATION
-   - If granted: Start location tracking immediately
-4. setContent() renders SpeedometerScreen with ViewModel state
+```text
+LocationManager GPS_PROVIDER ─┐
+GnssStatus satellite count ───┤
+TYPE_LINEAR_ACCELERATION ──────┼─> SpeedRepositoryImpl worker thread
+TYPE_ROTATION_VECTOR ──────────┘             │
+                                             v
+                                      SpeedEstimator
+                                             │
+                                             v
+                                      SpeedEstimate
+                                             │
+                                             v
+                              SpeedometerViewModel -> Compose
 ```
 
-### Flow 2: Permission Handling
+`SpeedRepositoryImpl` serializes location and sensor callbacks on one `HandlerThread`. It emits UI estimates at no more than 10 Hz on the main thread. Starting and stopping are idempotent, and all listeners are removed in `onStop`.
 
-```
-1. requestPermissionLauncher registers for multiple permissions
-2. System shows permission dialog(s)
-3. On result:
-   - ACCESS_FINE_LOCATION granted → startLocationTracking()
-   - ACCESS_FINE_LOCATION denied:
-     - If coarse granted: "Precise Location required for GPS speed accuracy."
-     - If both denied: "Location permission denied."
-4. Error message displayed in red on SpeedometerScreen
-```
+GNSS satellite callbacks only update satellite state. They never replay a cached `Location` and never refresh fix age.
 
-### Flow 3: GPS Location Updates
+## Measurement Semantics
 
-```
-1. LocationRepositoryImpl.requestLocationUpdates(GPS_PROVIDER)
-2. GnssStatus.Callback tracks satellite count (usedInFix)
-3. On each LocationListener.onLocationChanged():
-   - Create GpsReading(speed, accuracy, satelliteCount, timestamp)
-   - Push to SpeedometerViewModel.onGpsReadingReceived()
-4. SpeedometerViewModel:
-   - GpsSignalFilter validates reading (accuracy ≤50m, speed ≥1.5km/h)
-   - SessionStatisticsTracker updates current/max stats
-   - Compose state updates trigger recomposition
-```
+`GnssMeasurement` preserves:
 
-### Flow 4: Watchdog Timer (Tunnel Detection)
+- Optional speed from `Location.hasSpeed()`
+- Optional 68-percent speed uncertainty on API 26+
+- Optional bearing and bearing uncertainty
+- Horizontal positional accuracy, kept separate from speed uncertainty
+- Local magnetic declination
+- Satellites used in fix
+- `Location.elapsedRealtimeNanos` measurement time
 
-```
-1. startWatchdog() launches 1-second interval coroutine
-2. Tracks lastFixTime (updated on each GPS reading)
-3. If >2000ms pass with speed >0:
-   - Inject fake GpsReading with speed=0
-   - Simulates GPS signal loss handling
-4. stopWatchdog() cancels on onStop()
+`MotionMeasurement` preserves transformed East/North/Up linear acceleration, device yaw/pitch/roll, orientation reliability, and `SensorEvent.timestamp`.
+
+Both timestamps use Android's elapsed-realtime-since-boot timebase. Callback arrival time and wall-clock time are not used for filtering.
+
+## Estimator
+
+### GNSS Correction
+
+GNSS speed is authoritative. Measurement variance starts from Android's speed uncertainty:
+
+```text
+sigma = max(reportedSpeedAccuracy, 0.2 m/s)
+R = (1.5 * sigma)^2
 ```
 
-### Flow 5: Session Lifecycle
+Missing speed accuracy receives a conservative `2.0 m/s` uncertainty. Measurements above `3.0 m/s` reported uncertainty do not correct the estimate. Poor horizontal position accuracy alone does not force speed to zero.
 
-```
-onStart():
-  - checkPermissionsAndStart()
-  - startWatchdog()
-  - viewModel.onSessionStart()
+An innovation gate rejects isolated statistically implausible speed jumps. Three consecutive high-quality, mutually consistent fixes trigger controlled reacquisition so the filter cannot lock out after a genuine speed change or GNSS outage.
 
-onStop():
-  - stopLocationTracking()
-  - stopWatchdog()
-  - If NOT changing configurations:
-      viewModel.onSessionReset() → clears all stats
-```
+### Fixed-Mode Prediction
 
-### Flow 6: Picture-in-Picture Mode
+The fixed-mode state is forward speed and longitudinal acceleration bias:
 
-```
-1. User taps "float" button
-2. enterPipMode() builds PictureInPictureParams:
-   - aspectRatio: Rational(16, 9)
-3. enterPictureInPictureMode(params)
-4. onPictureInPictureModeChanged() updates isInPipMode state
-5. UI hides satellite status and stats, scales down fonts
+```text
+x = [speed, bias]
+speed' = speed + (longitudinalAcceleration - bias) * dt
+bias' = bias
 ```
 
----
+All covariance calculations use `Double`. GNSS corrections use the Joseph covariance form for numerical stability.
 
-## 4. Edge Cases & Error Handling
+### Delayed Measurements
 
-### Edge Case: GPS Signal Loss
+The estimator retains five seconds of timestamped inputs and state checkpoints. A GNSS measurement delayed by up to three seconds is inserted at its measurement epoch, then all later events are replayed. Applying an old fix at callback time is prohibited.
 
-| Scenario | Behavior |
-|----------|----------|
-| GPS stops providing updates | Watchdog injects speed=0 readings after 2s timeout |
-| No satellites (<3) | Satellite indicator turns red, speed still displays |
-| Signal returns | Normal updates resume, watchdog resets |
+### Low Speed and Stationarity
 
-### Edge Case: Invalid GPS Readings
+There is no arbitrary minimum display speed. Valid values such as 0.1, 0.2, or 0.5 m/s remain numeric.
 
-| Condition | Filter Behavior | Result |
-|-----------|----------------|--------|
-| Accuracy > 50m | `hasAcceptableAccuracy()` returns false | Speed set to 0 |
-| Speed < 1.5 km/h | `hasAcceptableSpeed()` returns false | Speed set to 0 |
-| Both invalid | Both checks fail | Speed set to 0, stats preserved |
+Zero requires repeated, high-confidence GNSS readings of exactly zero over at least two seconds. Every accepted positive speed immediately exits stationarity, however small it is. Fixed mode additionally requires quiet longitudinal acceleration.
 
-**Code Reference:** `GpsSignalFilter.kt`
+The internal Gaussian state is not clipped. Only the published result is constrained to the physically valid non-negative speed domain.
 
-```kotlin
-fun isSignalAcceptable(reading: GpsReading): Boolean {
-    return hasAcceptableAccuracy(reading) && hasAcceptableSpeed(reading)
-}
+### Signal Age
 
-private fun hasAcceptableAccuracy(reading: GpsReading): Boolean {
-    return reading.accuracyMeters == null || reading.accuracyMeters <= config.maxAccuracyMeters
-}
+| Condition | Result |
+|---|---|
+| No accepted speed | Acquiring, no number |
+| Recent correction with 2-sigma uncertainty at or below 1 m/s | Tracking |
+| Correction age up to 3 seconds | Estimated/degraded number |
+| Correction older than 3 seconds | Unavailable, `--` |
+| Strong stationary evidence | Valid `0.00` |
 
-private fun hasAcceptableSpeed(reading: GpsReading): Boolean {
-    val speedKmh = SpeedConverter.metersPerSecondToKmh(reading.speedMetersPerSecond)
-    return speedKmh >= config.minSpeedKmh
-}
+No watchdog injects fake zero readings.
+
+## Session Behavior
+
+- Acquisition starts in `onStart` after precise-location permission is available
+- Acquisition and all sensor listeners stop in `onStop`
+- Session statistics reset when the app backgrounds
+- Display unit and tracking mode persist locally
+- No location, motion, or session history leaves the device
+
+## Errors and Fallbacks
+
+| Condition | Behavior |
+|---|---|
+| Fine location denied | Explain that precise location is required |
+| GPS provider disabled | Display `gps provider disabled` |
+| Speed absent or invalid | Ignore the measurement; never synthesize zero |
+| Speed uncertainty too poor | Preserve the prior estimate until it becomes stale |
+| Fixed-mode sensors absent | Disable fixed mode |
+| Orientation unreliable or stale | Continue GNSS-only |
+| Course absent or stale | Continue GNSS-only |
+| Gross phone movement | Drop the course anchor and require GNSS reacquisition |
+| GNSS absent for more than 3 seconds | Mark speed unavailable |
+
+## Architecture
+
+```text
+app/src/main/java/com/mightykatun/speedometer/app/
+├── MainActivity.kt
+├── SpeedometerViewModel.kt
+├── data/repository/
+│   ├── SpeedRepository.kt
+│   └── SpeedRepositoryImpl.kt
+├── di/SpeedometerViewModelFactory.kt
+└── domain/
+    ├── SpeedEstimator.kt
+    ├── SessionStatisticsTracker.kt
+    ├── TimeProvider.kt
+    ├── model/
+    │   ├── EstimateQuality.kt
+    │   ├── GnssMeasurement.kt
+    │   ├── MotionMeasurement.kt
+    │   ├── SessionConfig.kt
+    │   ├── SpeedEstimate.kt
+    │   ├── SpeedEstimatorConfig.kt
+    │   ├── SpeedometerState.kt
+    │   ├── SpeedUnit.kt
+    │   └── TrackingMode.kt
+    ├── time/ProductionTimeProvider.kt
+    └── util/SpeedConverter.kt
 ```
 
-### Edge Case: Warmup Period
+No third-party location or sensor-fusion package is used. Android's composite sensors provide orientation/gravity removal; the app-specific two-state estimator remains explicit and JVM-tested.
 
-| Scenario | Behavior |
-|----------|----------|
-| First 5 seconds after session start | maxSpeedKmh not updated |
-| After warmup (≥5s) + ≥3 satellites | maxSpeedKmh tracked normally |
+## Verification
 
-**Code Reference:** `SessionStatisticsTracker.kt`
-
-```kotlin
-val elapsed = timeProvider.currentTimeMillis() - sessionStartTime
-if (elapsed >= config.warmupPeriodMillis && 
-    reading.satelliteCount >= config.minSatellitesForTracking) {
-    maxSpeedKmh = max(maxSpeedKmh, currentSpeedKmh)
-}
-```
-
-### Edge Case: Permission Denied
-
-| Permission | Error Message |
-|------------|---------------|
-| Only ACCESS_COARSE_LOCATION granted | "Precise Location required for GPS speed accuracy.\nPlease allow 'Precise' in settings." |
-| Both denied | "Location permission denied.\nApp requires GPS access to function." |
-
-### Edge Case: GPS Provider Disabled
-
-| Scenario | Behavior |
-|----------|----------|
-| GPS provider turned off | `onProviderDisabled()` fires, error pushed to ViewModel |
-| User sees `gps provider disabled` in red | Overlay stops updating |
-
-### Edge Case: App Backgrounded
-
-| Scenario | Behavior |
-|----------|----------|
-| User switches away (onStop) | GPS hardware disconnected, session reset |
-| User returns (onStart) | New session starts, stats cleared |
-
----
-
-## 5. Technical Components
-
-### Core Architecture
-
-| Component | File | Purpose |
-|-----------|------|---------|
-| Entry Point | `MainActivity.kt` | Permission handling, lifecycle, GPS management |
-| ViewModel | `SpeedometerViewModel.kt` | State management, GPS reading processing |
-| Repository Interface | `data/repository/LocationRepository.kt` | Location update contract |
-| Repository Impl | `data/repository/LocationRepositoryImpl.kt` | Android LocationManager/GnssStatus integration |
-| DI Factory | `di/SpeedometerViewModelFactory.kt` | Manual dependency injection |
-| GPS Signal Filter | `domain/GpsSignalFilter.kt` | Validates GPS reading quality |
-| Session Tracker | `domain/SessionStatisticsTracker.kt` | Tracks speed and satellite stats |
-| Time Abstraction | `domain/TimeProvider.kt` | Interface for time (testability) |
-| Time Impl | `domain/time/ProductionTimeProvider.kt` | `SystemClock.elapsedRealtime()` implementation |
-| Speed Converter | `domain/util/SpeedConverter.kt` | m/s ↔ km/h conversion |
-| Speed Unit | `domain/model/SpeedUnit.kt` | Display conversion, cycling, and persistence values |
-| Domain Models | `domain/model/` | GpsReading, SpeedometerState, SessionConfig, SessionStatistics |
-
-### Default Configuration (SessionConfig)
-
-| Parameter | Default | Purpose |
-|-----------|---------|---------|
-| `warmupPeriodMillis` | 5000L | 5-second warmup before tracking max speed |
-| `minSatellitesForTracking` | 3 | Minimum satellites for valid reading |
-| `maxAccuracyMeters` | 50f | Max GPS accuracy tolerance |
-| `minSpeedKmh` | 1.5f | Minimum speed to register as valid |
-| `gpsSignalTimeoutMillis` | 2000L | Watchdog timeout threshold |
-
-### State Management
-
-**SpeedometerState (Compose UI state):**
-```kotlin
-data class SpeedometerState(
-    val currentSpeedKmh: Float,    // Current speed from GPS
-    val maxSpeedKmh: Float,         // Session max speed
-    val satelliteCount: Int,        // Current satellite count
-    val maxSatelliteCount: Int      // Session max satellites
-)
-```
-
-**GpsReading (from LocationRepository):**
-```kotlin
-data class GpsReading(
-    val speedMetersPerSecond: Float,
-    val accuracyMeters: Float?,
-    val satelliteCount: Int,
-    val timestamp: Long
-)
-```
-
-### Permissions
-
-| Permission | Purpose |
-|------------|---------|
-| `ACCESS_FINE_LOCATION` | GPS speed calculation (required) |
-| `ACCESS_COARSE_LOCATION` | Fallback location (secondary) |
-
-**No internet permissions** — Privacy-focused, no tracking or telemetry.
-
-### Dependencies
-
-| Library | Version |
-|---------|---------|
-| Android Gradle Plugin | 8.13.2 |
-| Kotlin | 1.9.0 |
-| Compose Compiler | 1.5.1 |
-| Compose BOM | 2023.08.00 |
-| Core KTX | 1.12.0 |
-| Lifecycle Runtime KTX | 2.7.0 |
-| Activity Compose | 1.8.2 |
-| Material3 | (via BOM) |
-
-### Build Commands
+Automated gates:
 
 ```bash
-# Debug APK (faster, no signing)
-./gradlew assembleDebug
-
-# Release APK (requires keystore.properties)
-./gradlew assembleRelease
-
-# Install to connected device
-./gradlew installDebug
-
-# Run tests
-./gradlew test
-
-# Lint checks
-./gradlew lint
+./gradlew clean test lint assembleDebug
 ```
 
-### APK Locations
+Estimator tests cover low-speed preservation, invalid measurements, uncertainty gating, outliers, reacquisition, handheld isolation, fixed-mode prediction, course expiry, delayed replay, duplicate fixes, stationary evidence, mode reset, and stale-data unavailability.
 
-- **Debug:** `app/build/outputs/apk/debug/app-debug.apk`
-- **Release:** `app/build/outputs/apk/release/app-release.apk`
+## Field Validation
 
----
+Automated tests prove deterministic behavior, not real-world sensor accuracy. Production tuning must compare raw GNSS, handheld estimates, and fixed estimates against an independent reference across:
 
-## 6. Key Implementation Details
+- Parked engine-off and engine-running cases
+- Continuous 0.2, 0.5, and 1.0 m/s crawling
+- Normal and hard acceleration/braking
+- Hills, ramps, rough roads, and speed bumps
+- Constant-speed curves and roundabouts
+- Urban canyons and 1-10 second GNSS interruptions
+- Phone movement while fixed mode is selected
+- Multiple mounts and materially different Android devices
 
-### LocationRepository (GnssCallback)
+Initial acceptance targets:
 
-The `LocationRepositoryImpl` uses two parallel data sources:
+| Metric | Target |
+|---|---|
+| Clear-sky moving 95th-percentile absolute error | At most 0.5 m/s |
+| Two-second dropout 95th-percentile error | At most 1.0 m/s |
+| Constant-speed turn pulse | At most 0.5 m/s |
+| False stationary decisions during crawl corpus | Zero |
+| Delayed replay versus chronological replay | Floating-point tolerance |
 
-1. **LocationListener** — Provides speed (`location.speed` in m/s) and accuracy (`location.accuracy`)
-2. **GnssStatus.Callback** — Counts satellites used in fix (`status.usedInFix(i)`)
-
-Both sources feed into `onReadingUpdate` callbacks, ensuring speed and satellite count are always delivered together.
-
-### Speed Display Formatting
-
-Speed is displayed as `XXX.XX unit` with:
-- Integer part in large display font (120sp → 64sp in PiP)
-- Decimal part in headline medium (40sp → 24sp in PiP)
-- A tappable unit cycling through km/h, mph, knots, and m/s
-- Monospace font for satellite/stats labels
-
-### Session Reset Behavior
-
-- Stats reset when app goes to background (`onStop`)
-- New session starts fresh on `onStart`
-- Session statistics do not persist between app launches; the selected display unit does
-
----
-
-## 7. Project Structure
-
-```
-app/src/main/java/com/mightykatun/speedometer/app/
-├── MainActivity.kt                    # Activity + Compose UI
-├── SpeedometerViewModel.kt           # State management
-├── domain/
-│   ├── model/
-│   │   ├── GpsReading.kt             # GPS data model
-│   │   ├── SpeedUnit.kt              # Display units and conversion
-│   │   ├── SpeedometerState.kt      # UI state model
-│   │   ├── SessionConfig.kt         # Configuration model
-│   │   └── SessionStatistics.kt     # Statistics model
-│   ├── util/
-│   │   └── SpeedConverter.kt        # Unit conversion
-│   ├── GpsSignalFilter.kt           # GPS quality filter
-│   ├── SessionStatisticsTracker.kt  # Session tracking
-│   ├── TimeProvider.kt              # Time abstraction interface
-│   └── time/
-│       └── ProductionTimeProvider.kt # SystemClock implementation
-├── data/
-│   └── repository/
-│       ├── LocationRepository.kt     # Repository interface
-│       └── LocationRepositoryImpl.kt # Android GPS implementation
-└── di/
-    └── SpeedometerViewModelFactory.kt # Dependency injection
-```
-
----
-
-## 8. Design Decisions
-
-| Decision | Rationale |
-|----------|-----------|
-| No internet permissions | Privacy-focused — no data leaves the device |
-| Session-based stats | All data resets on background — no tracking |
-| Monospace fonts | Consistent digit width for stable HUD display |
-| Green/Red satellite indicator | Instant visual feedback on GPS quality |
-| 5-second warmup | Prevents spurious max speed during GPS initialization |
-| PiP mode | Allows speedometer overlay while using other apps |
-| Watchdog timer | Graceful handling of GPS signal loss (tunnel scenarios) |
-| Manual DI (no Hilt/Koin) | Minimal dependencies, single-purpose app |
+Fixed mode should ship as an accuracy improvement only if it beats GNSS-only error or response latency across the complete validation corpus. Visual smoothness alone is not evidence of accuracy.

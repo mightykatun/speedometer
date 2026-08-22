@@ -130,20 +130,24 @@ app/src/main/java/com/mightykatun/speedometer/app/
 ├── SpeedometerViewModel.kt            # State management and UI logic
 ├── domain/                          # Business logic (pure Kotlin)
 │   ├── model/                         # Data models
-│   │   ├── GpsReading.kt
+│   │   ├── GnssMeasurement.kt
+│   │   ├── MotionMeasurement.kt
+│   │   ├── SpeedEstimate.kt
+│   │   ├── SpeedEstimatorConfig.kt
+│   │   ├── TrackingMode.kt
 │   │   ├── SpeedometerState.kt
 │   │   ├── SessionConfig.kt
 │   │   └── SessionStatistics.kt
 │   ├── util/                          # Utilities
 │   │   └── SpeedConverter.kt
-│   ├── GpsSignalFilter.kt            # GPS signal validation
+│   ├── SpeedEstimator.kt             # Confidence-aware GNSS/IMU fusion
 │   ├── SessionStatisticsTracker.kt      # Session tracking logic
 │   └── TimeProvider.kt                # Time abstraction
 ├── data/                           # Data layer
 │   ├── ProductionTimeProvider.kt         # Time implementation
 │   └── repository/                     # Repository pattern
-│       ├── LocationRepository.kt          # Repository interface
-│       └── LocationRepositoryImpl.kt     # Repository implementation
+│       ├── SpeedRepository.kt             # Speed update contract
+│       └── SpeedRepositoryImpl.kt         # Serialized GNSS/sensor acquisition
 ├── di/                             # Dependency injection
 │   └── SpeedometerViewModelFactory.kt    # ViewModel factory
 └── AndroidManifest.xml               # App configuration and permissions
@@ -202,7 +206,9 @@ If `keystore.properties` doesn't exist, release builds will run unsigned for deb
 - **Privacy-focused**: No internet permissions or tracking libraries
 - **Battery-conscious**: GPS hardware disconnected when app loses focus
 - **Session-based**: All data resets when app goes to background
-- **Real-time**: Uses coroutines for GPS watchdog timers
+- **Real-time**: Uses one HandlerThread for ordered GNSS and motion processing
+- **Accuracy-aware**: GNSS speed remains authoritative; IMU prediction is bounded to short gaps
+- **Mode-aware**: Handheld mode ignores motion sensors; fixed mode requires a rigid mount
 
 ## Common Tasks
 
