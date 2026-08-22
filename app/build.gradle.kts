@@ -7,11 +7,11 @@ plugins {
 }
 
 android {
-    namespace = "com.legitdev.speedometer.app"
+    namespace = "com.mightykatun.speedometer.app"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.legitdev.speedometer.app"
+        applicationId = "com.mightykatun.speedometer.app"
         minSdk = 24
         targetSdk = 35
         versionCode = 2

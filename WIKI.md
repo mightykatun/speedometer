@@ -2,10 +2,10 @@
 
 ## Overview
 
-**App Name:** GPS Speedometer  
-**Package:** `com.legitdev.speedometer.app`  
-**Type:** Native Android application  
-**Core Function:** Real-time GPS-based speedometer with HUD interface for drivers
+- **App Name:** Speedometer
+- **Package:** `com.mightykatun.speedometer.app`
+- **Type:** Native Android application
+- **Core Function:** Real-time GPS-based speedometer with HUD interface for drivers
 
 ---
 
@@ -56,16 +56,15 @@ SpeedometerViewModel (state management)
 - Large speed number split into integer + decimal parts
 - Integer part: 120sp bold, large letter-spacing (-4sp)
 - Decimal part: `.XX` in 40sp, secondary color
-- Unit: `km/h` in 24sp, tertiary color
-- Format: `XXX.XX km/h`
+- Unit: `km/h`, `mph`, `kn`, or `m/s` in 24sp, tertiary color
+- Tapping the unit cycles formats and remembers the selection
 
 **C. Statistics Area (Bottom Left)**
-- Horizontal divider (150dp width)
-- `top speed: X.X` — tracked maximum speed
+- `top speed: X.X unit` — tracked maximum speed in the selected unit
 - `top satellites: N` — highest satellite count seen
 
 **D. PiP Button (Bottom Right)**
-- Button labeled "Float"
+- Button labeled "float"
 - Opens Picture-in-Picture mode (Android O+)
 - Uses `PictureInPictureParams.Builder` with 16:9 aspect ratio
 
@@ -85,7 +84,6 @@ When in Picture-in-Picture:
 | Secondary (decimal) | LightGray | DarkGray |
 | Tertiary (unit) | Gray | Gray |
 | Label text | Gray | DarkGray |
-| Divider | DarkGray | LightGray |
 | PiP button container | Gray | LightGray |
 | PiP button text | White | Black |
 | Satellite indicator | Green (≥3) / Red (<3) | Same |
@@ -97,7 +95,7 @@ When in Picture-in-Picture:
 ### Flow 1: First Launch
 
 ```
-1. User taps "GPS Speedometer" icon
+1. User taps "Speedometer" icon
 2. MainActivity.onCreate() initializes:
    - SpeedometerViewModel via ViewModelFactory
    - LocationRepositoryImpl instance
@@ -163,7 +161,7 @@ onStop():
 ### Flow 6: Picture-in-Picture Mode
 
 ```
-1. User taps "Float" button
+1. User taps "float" button
 2. enterPipMode() builds PictureInPictureParams:
    - aspectRatio: Rational(16, 9)
 3. enterPictureInPictureMode(params)
@@ -237,7 +235,7 @@ if (elapsed >= config.warmupPeriodMillis &&
 | Scenario | Behavior |
 |----------|----------|
 | GPS provider turned off | `onProviderDisabled()` fires, error pushed to ViewModel |
-| User sees error message in red | Overlay stops updating |
+| User sees `gps provider disabled` in red | Overlay stops updating |
 
 ### Edge Case: App Backgrounded
 
@@ -264,6 +262,7 @@ if (elapsed >= config.warmupPeriodMillis &&
 | Time Abstraction | `domain/TimeProvider.kt` | Interface for time (testability) |
 | Time Impl | `domain/time/ProductionTimeProvider.kt` | `SystemClock.elapsedRealtime()` implementation |
 | Speed Converter | `domain/util/SpeedConverter.kt` | m/s ↔ km/h conversion |
+| Speed Unit | `domain/model/SpeedUnit.kt` | Display conversion, cycling, and persistence values |
 | Domain Models | `domain/model/` | GpsReading, SpeedometerState, SessionConfig, SessionStatistics |
 
 ### Default Configuration (SessionConfig)
@@ -359,28 +358,30 @@ Both sources feed into `onReadingUpdate` callbacks, ensuring speed and satellite
 
 ### Speed Display Formatting
 
-Speed is displayed as `XXX.XX km/h` with:
+Speed is displayed as `XXX.XX unit` with:
 - Integer part in large display font (120sp → 64sp in PiP)
 - Decimal part in headline medium (40sp → 24sp in PiP)
+- A tappable unit cycling through km/h, mph, knots, and m/s
 - Monospace font for satellite/stats labels
 
 ### Session Reset Behavior
 
 - Stats reset when app goes to background (`onStop`)
 - New session starts fresh on `onStart`
-- No persistence between app launches (privacy-focused)
+- Session statistics do not persist between app launches; the selected display unit does
 
 ---
 
 ## 7. Project Structure
 
 ```
-app/src/main/java/com/example/gpsspeedometer/
+app/src/main/java/com/mightykatun/speedometer/app/
 ├── MainActivity.kt                    # Activity + Compose UI
 ├── SpeedometerViewModel.kt           # State management
 ├── domain/
 │   ├── model/
 │   │   ├── GpsReading.kt             # GPS data model
+│   │   ├── SpeedUnit.kt              # Display units and conversion
 │   │   ├── SpeedometerState.kt      # UI state model
 │   │   ├── SessionConfig.kt         # Configuration model
 │   │   └── SessionStatistics.kt     # Statistics model
