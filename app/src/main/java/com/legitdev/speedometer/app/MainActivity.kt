@@ -2,6 +2,7 @@ package com.legitdev.speedometer.app
 
 import android.Manifest
 import android.app.PictureInPictureParams
+import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
@@ -13,6 +14,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Button
@@ -24,6 +26,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -34,6 +37,7 @@ import androidx.lifecycle.lifecycleScope
 import com.legitdev.speedometer.app.data.repository.LocationRepositoryImpl
 import com.legitdev.speedometer.app.di.SpeedometerViewModelFactory
 import com.legitdev.speedometer.app.domain.model.GpsReading
+import com.legitdev.speedometer.app.domain.model.SpeedUnit
 import com.legitdev.speedometer.app.domain.model.SpeedometerState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -50,6 +54,7 @@ class MainActivity : ComponentActivity() {
     private var lastFixTime: Long = 0L
 
     private var isInPipMode by mutableStateOf(false)
+    private var speedUnit by mutableStateOf(SpeedUnit.KILOMETERS_PER_HOUR)
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -73,6 +78,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         locationRepository = LocationRepositoryImpl(this)
+        speedUnit = SpeedUnit.fromPreference(
+            getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+                .getString(SPEED_UNIT_KEY, null)
+        )
         
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) 
             != PackageManager.PERMISSION_GRANTED) {
@@ -89,6 +98,8 @@ class MainActivity : ComponentActivity() {
                 state = viewModel.state,
                 error = viewModel.errorMessage,
                 isInPipMode = isInPipMode,
+                speedUnit = speedUnit,
+                onSpeedUnitClick = { cycleSpeedUnit() },
                 onEnterPip = { enterPipMode() }
             )
         }
@@ -108,6 +119,14 @@ class MainActivity : ComponentActivity() {
                 .build()
             enterPictureInPictureMode(params)
         }
+    }
+
+    private fun cycleSpeedUnit() {
+        speedUnit = speedUnit.next()
+        getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(SPEED_UNIT_KEY, speedUnit.preferenceValue)
+            .apply()
     }
 
     override fun onStart() {
@@ -174,6 +193,11 @@ class MainActivity : ComponentActivity() {
             locationRepository.stopLocationUpdates()
         }
     }
+
+    private companion object {
+        const val PREFERENCES_NAME = "speedometer_preferences"
+        const val SPEED_UNIT_KEY = "speed_unit"
+    }
 }
 
 @Composable
@@ -181,6 +205,8 @@ fun SpeedometerScreen(
     state: SpeedometerState,
     error: String?,
     isInPipMode: Boolean,
+    speedUnit: SpeedUnit,
+    onSpeedUnitClick: () -> Unit,
     onEnterPip: () -> Unit
 ) {
     val isDark = isSystemInDarkTheme()
@@ -194,6 +220,8 @@ fun SpeedometerScreen(
     val pipContentColor = if (isDark) Color.White else Color.Black
 
     val statusColor = if (state.satelliteCount >= 3) Color.Green else Color.Red
+    val currentSpeed = speedUnit.fromKilometersPerHour(state.currentSpeedKmh)
+    val maxSpeed = speedUnit.fromKilometersPerHour(state.maxSpeedKmh)
 
     // Adjust font sizes for PiP mode
     val mainSpeedSize = if (isInPipMode) 64.sp else 120.sp
@@ -249,7 +277,7 @@ fun SpeedometerScreen(
                 modifier = Modifier.align(Alignment.Center),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                val formattedSpeed = "%.2f".format(Locale.US, state.currentSpeedKmh)
+                val formattedSpeed = "%.2f".format(Locale.US, currentSpeed)
                 val parts = formattedSpeed.split(".")
                 val intPart = parts[0]
                 val decPart = if (parts.size > 1) parts[1] else "00"
@@ -284,12 +312,18 @@ fun SpeedometerScreen(
 
                     // Unit
                     Text(
-                        text = "km/h",
+                        text = speedUnit.label,
                         style = MaterialTheme.typography.headlineMedium.copy(
                             fontSize = unitSize,
                             color = tertiaryColor
                         ),
-                        modifier = Modifier.alignByBaseline()
+                        modifier = Modifier
+                            .alignByBaseline()
+                            .clickable(
+                                onClickLabel = "Change speed unit",
+                                role = Role.Button,
+                                onClick = onSpeedUnitClick
+                            )
                     )
                 }
             }
@@ -305,7 +339,12 @@ fun SpeedometerScreen(
                         color = dividerColor
                     )
 
-                    StatRow(label = "top speed", value = "%.1f".format(state.maxSpeedKmh), labelColor, primaryColor)
+                    StatRow(
+                        label = "top speed",
+                        value = "%.1f %s".format(Locale.US, maxSpeed, speedUnit.label),
+                        labelColor,
+                        primaryColor
+                    )
                     StatRow(label = "top satellites", value = "${state.maxSatelliteCount}", labelColor, primaryColor)
                 }
                 

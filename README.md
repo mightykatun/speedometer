@@ -12,7 +12,7 @@ Download and install the APK from [Releases](https://github.com/mightykatun/spee
 
 ## Features
 
-* **Real-time Speed:** Centered display in km/h with dynamic font sizing to fit any screen width.
+* **Real-time Speed:** Centered display in km/h, mph, knots, or m/s with dynamic font sizing. Tap the unit to cycle; the selection is remembered.
 * **Satellite Status:** Real-time GNSS satellite count with a color-coded status indicator (Red/Green).
 * **Session Statistics:**
     * **Top Speed:** Tracks the maximum speed reached in the current session.
