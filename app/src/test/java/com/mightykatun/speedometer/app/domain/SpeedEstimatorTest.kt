@@ -85,14 +85,28 @@ class SpeedEstimatorTest {
     }
 
     @Test
-    fun `uncertainty grows between GNSS fixes`() {
+    fun `normal GNSS interval stays tracking before uncertainty degrades`() {
         val estimator = SpeedEstimator()
         val initial = estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1)))
 
-        val predicted = estimator.estimateAt(seconds(2))
+        val normalInterval = estimator.estimateAt(seconds(2))
+        val delayedInterval = estimator.estimateAt(seconds(3))
 
-        assertTrue(predicted.uncertaintyMetersPerSecond > initial.uncertaintyMetersPerSecond)
-        assertEquals(EstimateQuality.DEGRADED, predicted.quality)
+        assertTrue(normalInterval.uncertaintyMetersPerSecond > initial.uncertaintyMetersPerSecond)
+        assertEquals(EstimateQuality.TRACKING, normalInterval.quality)
+        assertEquals(EstimateQuality.DEGRADED, delayedInterval.quality)
+    }
+
+    @Test
+    fun `display quality does not relax maximum speed trust`() {
+        val estimator = SpeedEstimator()
+        val gnssEstimate = estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1)))
+
+        val prediction = estimator.estimateAt(seconds(2))
+
+        assertTrue(gnssEstimate.trustedForMaximum)
+        assertEquals(EstimateQuality.TRACKING, prediction.quality)
+        assertTrue(!prediction.trustedForMaximum)
     }
 
     @Test
@@ -149,6 +163,40 @@ class SpeedEstimatorTest {
 
         assertNull(estimate.speedMetersPerSecond)
         assertEquals(EstimateQuality.UNAVAILABLE, estimate.quality)
+    }
+
+    @Test
+    fun `fixed mode invalidates stale course from an unusable fix`() {
+        val estimator = fixedEstimatorWithSeed()
+        estimator.onGnssMeasurement(gnss(1.0, 0.1, seconds(2), bearing = null))
+
+        val estimate = estimator.onMotionMeasurement(motion(-10.0, seconds(2) + 100_000_000L))
+
+        assertEquals(10.0, estimate.speedMetersPerSecond!!, 0.0001)
+    }
+
+    @Test
+    fun `fixed mode inertial drift cannot force a moving estimate to zero`() {
+        val estimator = fixedEstimatorWithSeed()
+        for (step in 1..10) {
+            estimator.onMotionMeasurement(motion(-15.0, seconds(1) + step * 100_000_000L))
+        }
+
+        val estimate = estimator.estimateAt(seconds(2))
+
+        assertTrue(estimate.speedMetersPerSecond!! >= 5.0)
+    }
+
+    @Test
+    fun `GNSS corrects immediately after fixed mode reaches its inertial bound`() {
+        val estimator = fixedEstimatorWithSeed()
+        for (step in 1..10) {
+            estimator.onMotionMeasurement(motion(-15.0, seconds(1) + step * 100_000_000L))
+        }
+
+        val estimate = estimator.onGnssMeasurement(gnss(0.0, 0.1, seconds(2) + 10_000_000L))
+
+        assertTrue(estimate.speedMetersPerSecond!! < 0.1)
     }
 
     @Test

@@ -13,7 +13,7 @@ Download and install the APK from [Releases](https://github.com/mightykatun/spee
 ## Features
 
 * **Accuracy-aware Speed:** GNSS speed is filtered by its reported uncertainty without hiding valid low-speed readings. The display shows its current uncertainty in km/h, mph, knots, or m/s.
-* **Tracking Modes:** Handheld mode uses GNSS only. Fixed mode uses the mounted phone's motion sensors for short-term smoothing between GNSS fixes and falls back safely when sensor quality is insufficient.
+* **Tracking Modes:** `gnss` uses satellite speed only. `gnss+imu` uses a rigidly mounted phone's motion sensors for short-term smoothing between GNSS fixes and falls back safely when sensor quality is insufficient.
 * **Satellite Status:** Real-time GNSS satellite count with a color-coded status indicator (Red/Green).
 * **Session Statistics:**
     * **Top Speed:** Tracks the maximum speed reached in the current session.
@@ -21,7 +21,7 @@ Download and install the APK from [Releases](https://github.com/mightykatun/spee
 * **Smart Logic:**
     * **5-Second Warmup:** Max speed tracking only begins 5 seconds after GPS lock to prevent initialization spikes.
     * **Confidence Weighting:** Android's speed uncertainty controls how strongly each GNSS reading corrects the estimate.
-    * **Short Dropout Bridging:** Fixed mode uses linear acceleration for no more than 3 seconds without trustworthy GNSS.
+    * **Short Dropout Bridging:** `gnss+imu` uses linear acceleration for no more than 3 seconds without trustworthy GNSS.
     * **No Artificial Floor:** Slow movement remains visible; zero is used only after strong stationary evidence.
     * **Honest Signal Loss:** Unreliable stale estimates become unavailable instead of snapping to zero.
 * **Privacy & Cleanliness:**
@@ -71,7 +71,7 @@ Download and install the APK from [Releases](https://github.com/mightykatun/spee
 
 ## Releases
 
-Pushing a version tag such as `v1.2.1` runs the GitHub Actions release workflow. It verifies the version, runs tests and lint, builds the APK, creates an explicit source ZIP, generates SHA-256 checksums, and publishes all assets to GitHub Releases.
+Pushing a version tag such as `v1.2.2` runs the GitHub Actions release workflow. It verifies the version, runs tests and lint, builds the APK, creates an explicit source ZIP, generates SHA-256 checksums, and publishes all assets to GitHub Releases.
 
 Production signing uses repository secrets. Without signing secrets, the workflow publishes a clearly named debug-signed test APK as a prerelease. See [RELEASING.md](RELEASING.md).
 

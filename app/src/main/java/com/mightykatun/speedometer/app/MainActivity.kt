@@ -230,57 +230,67 @@ fun SpeedometerScreen(
             )
         } else {
             if (!isInPipMode) {
-                // --- TOP LEFT: Satellite Status ---
-                Row(
-                    modifier = Modifier.align(Alignment.TopStart),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(12.dp)
-                            .background(statusColor, shape = androidx.compose.foundation.shape.CircleShape)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "satellites: ",
-                        color = labelColor,
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                        fontSize = 16.sp
-                    )
-                    Text(
-                        text = "${state.satelliteCount}",
-                        color = primaryColor,
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp
-                    )
-                }
-
                 Row(
                     modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .heightIn(min = 48.dp)
-                        .toggleable(
-                            value = trackingMode == TrackingMode.FIXED,
-                            enabled = supportsFixedMode,
-                            role = Role.Switch,
-                            onValueChange = onTrackingModeChange
-                        ),
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .height(48.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "mode: ",
-                        color = labelColor,
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                        fontSize = 14.sp
-                    )
-                    Text(
-                        text = if (trackingMode == TrackingMode.FIXED) "fixed" else "handheld",
-                        color = if (supportsFixedMode) primaryColor else labelColor,
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp
-                    )
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .background(statusColor, shape = androidx.compose.foundation.shape.CircleShape)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "satellites: ",
+                            color = labelColor,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            fontSize = 14.sp,
+                            maxLines = 1
+                        )
+                        Text(
+                            text = "${state.satelliteCount}",
+                            color = primaryColor,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            maxLines = 1
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .toggleable(
+                                value = trackingMode == TrackingMode.FIXED,
+                                enabled = supportsFixedMode,
+                                role = Role.Switch,
+                                onValueChange = onTrackingModeChange
+                            ),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "mode: ",
+                            color = labelColor,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            fontSize = 14.sp,
+                            maxLines = 1
+                        )
+                        Text(
+                            text = if (trackingMode == TrackingMode.FIXED) "gnss+imu" else "gnss",
+                            color = if (supportsFixedMode) primaryColor else labelColor,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            maxLines = 1
+                        )
+                    }
                 }
             }
 
@@ -388,6 +398,8 @@ private fun AccuracyIndicator(
     isInPipMode: Boolean,
     labelColor: Color
 ) {
+    if (quality == EstimateQuality.ACQUIRING) return
+
     val color = when (quality) {
         EstimateQuality.TRACKING -> Color.Green
         EstimateQuality.DEGRADED -> Color(0xFFFFA000)
@@ -396,29 +408,26 @@ private fun AccuracyIndicator(
     }
     val text = when (quality) {
         EstimateQuality.TRACKING, EstimateQuality.DEGRADED ->
-            accuracy?.let { "+/- %.1f %s".format(Locale.US, it, unit) } ?: "estimating"
-        EstimateQuality.ACQUIRING -> "gps..."
+            accuracy?.let { "± %.1f %s".format(Locale.US, it, unit) } ?: "estimating"
+        EstimateQuality.ACQUIRING -> ""
         EstimateQuality.UNAVAILABLE -> "no signal"
     }
 
-    Row(
-        modifier = Modifier.padding(top = if (isInPipMode) 2.dp else 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
+    if (isInPipMode) {
         Box(
             modifier = Modifier
-                .size(if (isInPipMode) 6.dp else 8.dp)
+                .padding(top = 2.dp)
+                .size(6.dp)
                 .background(color, androidx.compose.foundation.shape.CircleShape)
         )
-        if (!isInPipMode) {
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = text,
-                color = color,
-                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                fontSize = 13.sp
-            )
-        }
+    } else {
+        Text(
+            text = text,
+            color = color,
+            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+            fontSize = 13.sp,
+            modifier = Modifier.padding(top = 8.dp)
+        )
     }
 }
 

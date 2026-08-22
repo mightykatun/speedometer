@@ -12,6 +12,8 @@ class SpeedometerViewModel(
     private val sessionTracker: SessionStatisticsTracker
 ) : ViewModel() {
 
+    private var lastAccuracyUpdateNanos = Long.MIN_VALUE
+
     var state by mutableStateOf(SpeedometerState())
         private set
 
@@ -20,11 +22,21 @@ class SpeedometerViewModel(
 
     fun onSpeedEstimateReceived(estimate: SpeedEstimate) {
         val stats = sessionTracker.updateSpeed(estimate)
+        val measuredAccuracyKmh = estimate.uncertaintyMetersPerSecond
+            .takeIf { it.isFinite() }
+            ?.let { (it * 3.6).toFloat() }
+        val shouldRefreshAccuracy = measuredAccuracyKmh != null &&
+            (state.speedAccuracyKmh == null || lastAccuracyUpdateNanos == Long.MIN_VALUE ||
+                estimate.timestampNanos - lastAccuracyUpdateNanos >= ACCURACY_UPDATE_PERIOD_NANOS)
+        if (shouldRefreshAccuracy) lastAccuracyUpdateNanos = estimate.timestampNanos
+
         state = state.copy(
             currentSpeedKmh = stats.currentSpeedKmh,
-            speedAccuracyKmh = estimate.uncertaintyMetersPerSecond
-                .takeIf { it.isFinite() }
-                ?.let { (it * 3.6).toFloat() },
+            speedAccuracyKmh = when {
+                measuredAccuracyKmh == null -> null
+                shouldRefreshAccuracy -> measuredAccuracyKmh
+                else -> state.speedAccuracyKmh
+            },
             estimateQuality = estimate.quality,
             maxSpeedKmh = stats.maxSpeedKmh
         )
@@ -44,6 +56,7 @@ class SpeedometerViewModel(
 
     fun onSessionReset() {
         sessionTracker.reset()
+        lastAccuracyUpdateNanos = Long.MIN_VALUE
         state = SpeedometerState()
         errorMessage = null
     }
@@ -54,5 +67,9 @@ class SpeedometerViewModel(
 
     fun onGpsAvailable() {
         errorMessage = null
+    }
+
+    private companion object {
+        const val ACCURACY_UPDATE_PERIOD_NANOS = 1_000_000_000L
     }
 }

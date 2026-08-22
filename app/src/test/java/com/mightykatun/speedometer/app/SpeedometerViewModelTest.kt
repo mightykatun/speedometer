@@ -51,11 +51,42 @@ class SpeedometerViewModelTest {
         assertNull(viewModel.errorMessage)
     }
 
-    private fun estimate(speed: Double?, quality: EstimateQuality) = SpeedEstimate(
+    @Test
+    fun `uncertainty display updates at most once per second`() {
+        whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 1000L, 1100L, 2000L)
+        viewModel.onSessionStart()
+
+        viewModel.onSpeedEstimateReceived(estimate(5.0, EstimateQuality.TRACKING, 0.2, 1_000_000_000L))
+        viewModel.onSpeedEstimateReceived(estimate(5.0, EstimateQuality.TRACKING, 0.8, 1_500_000_000L))
+        assertEquals(0.72f, viewModel.state.speedAccuracyKmh!!, 0.001f)
+
+        viewModel.onSpeedEstimateReceived(estimate(5.0, EstimateQuality.TRACKING, 0.8, 2_000_000_000L))
+        assertEquals(2.88f, viewModel.state.speedAccuracyKmh!!, 0.001f)
+    }
+
+    @Test
+    fun `first finite uncertainty is shown immediately after acquiring`() {
+        whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 1000L, 1100L)
+        viewModel.onSessionStart()
+        viewModel.onSpeedEstimateReceived(
+            estimate(null, EstimateQuality.ACQUIRING, Double.POSITIVE_INFINITY, 1_000_000_000L)
+        )
+
+        viewModel.onSpeedEstimateReceived(estimate(5.0, EstimateQuality.TRACKING, 0.2, 1_100_000_000L))
+
+        assertEquals(0.72f, viewModel.state.speedAccuracyKmh!!, 0.001f)
+    }
+
+    private fun estimate(
+        speed: Double?,
+        quality: EstimateQuality,
+        uncertainty: Double = 0.2,
+        timestampNanos: Long = 1L
+    ) = SpeedEstimate(
         speedMetersPerSecond = speed,
-        uncertaintyMetersPerSecond = 0.2,
+        uncertaintyMetersPerSecond = uncertainty,
         quality = quality,
         trustedForMaximum = quality == EstimateQuality.TRACKING,
-        timestampNanos = 1L
+        timestampNanos = timestampNanos
     )
 }

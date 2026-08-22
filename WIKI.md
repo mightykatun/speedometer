@@ -8,7 +8,7 @@
 - **Purpose:** Privacy-focused, accuracy-aware vehicle speed display
 - **Network access:** None
 
-The app uses Android GNSS speed as its absolute speed source. In fixed mode, Android's linear-acceleration and rotation-vector sensors provide bounded short-term prediction between GNSS fixes. Inertial data never replaces GNSS indefinitely.
+The app uses Android GNSS speed as its absolute speed source. In `gnss+imu` mode, Android's linear-acceleration and rotation-vector sensors provide bounded short-term prediction between GNSS fixes. Inertial data never replaces GNSS indefinitely.
 
 ## Screen
 
@@ -22,8 +22,8 @@ The app remains a single-screen HUD with no navigation graph.
 
 ### Top Right
 
-- Persisted text-only `handheld` / `fixed` switch matching the HUD labels
-- Defaults to handheld
+- Persisted text-only `gnss` / `gnss+imu` switch matching the HUD labels
+- Defaults to `gnss`
 - Disabled when the device lacks either linear acceleration or rotation-vector sensors
 - Hidden in Picture-in-Picture mode
 
@@ -33,7 +33,8 @@ The app remains a single-screen HUD with no navigation graph.
 - Tap the unit to cycle km/h, mph, knots, and m/s
 - Low speeds remain visible; there is no 1.5 km/h display floor
 - `--` means speed is not currently defensible
-- A small colored dot and compact `+/- value unit` line report estimator quality and one-standard-deviation uncertainty
+- A small colored dot in Picture-in-Picture and compact `± value unit` line report estimator quality and one-standard-deviation uncertainty
+- The uncertainty line is hidden while acquiring the first GNSS speed fix
 
 Accuracy states:
 
@@ -52,13 +53,13 @@ Accuracy states:
 
 ## Tracking Modes
 
-### Handheld
+### GNSS
 
-Handheld mode is the safe default. It confidence-weights GNSS speed and ignores all IMU input because hand movement cannot be separated reliably from vehicle acceleration.
+`gnss` is the safe default. It confidence-weights GNSS speed and ignores all IMU input because hand movement cannot be separated reliably from vehicle acceleration.
 
-### Fixed
+### GNSS + IMU
 
-Fixed mode assumes the phone is rigidly mounted. It:
+`gnss+imu` assumes the phone is rigidly mounted. It:
 
 1. Uses `TYPE_ROTATION_VECTOR` to transform device acceleration into magnetic East/North/Up.
 2. Anchors travel direction with a quality-gated GNSS bearing and local magnetic declination.
@@ -67,7 +68,7 @@ Fixed mode assumes the phone is rigidly mounted. It:
 5. Predicts speed and acceleration bias between GNSS corrections.
 6. Falls back to GNSS-only whenever orientation, course, timestamp, or sensor quality is inadequate.
 
-Fixed mode does not promise tunnel navigation. Inertial propagation is limited to three seconds because consumer accelerometer bias creates rapidly growing velocity error.
+`gnss+imu` does not promise tunnel navigation. Inertial propagation is limited to three seconds because consumer accelerometer bias creates rapidly growing velocity error.
 
 ## Data Pipeline
 
@@ -141,7 +142,7 @@ The estimator retains five seconds of timestamped inputs and state checkpoints. 
 
 There is no arbitrary minimum display speed. Valid values such as 0.1, 0.2, or 0.5 m/s remain numeric.
 
-Zero requires repeated, high-confidence GNSS readings of exactly zero over at least two seconds. Every accepted positive speed immediately exits stationarity, however small it is. Fixed mode additionally requires quiet longitudinal acceleration.
+Zero requires repeated, high-confidence GNSS readings of exactly zero over at least two seconds. Every accepted positive speed immediately exits stationarity, however small it is. `gnss+imu` additionally requires quiet longitudinal acceleration.
 
 The internal Gaussian state is not clipped. Only the published result is constrained to the physically valid non-negative speed domain.
 
@@ -173,7 +174,7 @@ No watchdog injects fake zero readings.
 | GPS provider disabled | Display `gps provider disabled` |
 | Speed absent or invalid | Ignore the measurement; never synthesize zero |
 | Speed uncertainty too poor | Preserve the prior estimate until it becomes stale |
-| Fixed-mode sensors absent | Disable fixed mode |
+| IMU sensors absent | Disable `gnss+imu` |
 | Orientation unreliable or stale | Continue GNSS-only |
 | Course absent or stale | Continue GNSS-only |
 | Gross phone movement | Drop the course anchor and require GNSS reacquisition |
@@ -217,11 +218,11 @@ Automated gates:
 ./gradlew clean test lint assembleDebug
 ```
 
-Estimator tests cover low-speed preservation, invalid measurements, uncertainty gating, outliers, reacquisition, handheld isolation, fixed-mode prediction, course expiry, delayed replay, duplicate fixes, stationary evidence, mode reset, and stale-data unavailability.
+Estimator tests cover low-speed preservation, invalid measurements, uncertainty gating, outliers, reacquisition, GNSS isolation, GNSS + IMU prediction, course expiry, delayed replay, duplicate fixes, stationary evidence, mode reset, and stale-data unavailability.
 
 ## Field Validation
 
-Automated tests prove deterministic behavior, not real-world sensor accuracy. Production tuning must compare raw GNSS, handheld estimates, and fixed estimates against an independent reference across:
+Automated tests prove deterministic behavior, not real-world sensor accuracy. Production tuning must compare raw GNSS and GNSS + IMU estimates against an independent reference across:
 
 - Parked engine-off and engine-running cases
 - Continuous 0.2, 0.5, and 1.0 m/s crawling
@@ -229,7 +230,7 @@ Automated tests prove deterministic behavior, not real-world sensor accuracy. Pr
 - Hills, ramps, rough roads, and speed bumps
 - Constant-speed curves and roundabouts
 - Urban canyons and 1-10 second GNSS interruptions
-- Phone movement while fixed mode is selected
+- Phone movement while `gnss+imu` is selected
 - Multiple mounts and materially different Android devices
 
 Initial acceptance targets:
@@ -242,4 +243,4 @@ Initial acceptance targets:
 | False stationary decisions during crawl corpus | Zero |
 | Delayed replay versus chronological replay | Floating-point tolerance |
 
-Fixed mode should ship as an accuracy improvement only if it beats GNSS-only error or response latency across the complete validation corpus. Visual smoothness alone is not evidence of accuracy.
+`gnss+imu` should ship as an accuracy improvement only if it beats GNSS-only error or response latency across the complete validation corpus. Visual smoothness alone is not evidence of accuracy.
