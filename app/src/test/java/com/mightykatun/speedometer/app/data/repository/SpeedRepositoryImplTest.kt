@@ -126,6 +126,88 @@ class SpeedRepositoryImplTest {
     }
 
     @Test
+    fun `imu only starts sensors without location permission`() {
+        val fixture = Fixture()
+        fixture.location.permissionGranted = false
+        val recording = Recording()
+
+        fixture.repository.start(TrackingMode.IMU_ONLY, recording)
+        fixture.worker.runAll()
+        fixture.main.runAll()
+
+        assertEquals(0, fixture.location.requestCount)
+        assertEquals(1, fixture.motion.registerCount)
+        assertEquals(listOf(TrackingMode.IMU_ONLY), recording.modes)
+        assertTrue(recording.errors.isEmpty())
+        verify(fixture.estimator).reset(TrackingMode.IMU_ONLY)
+    }
+
+    @Test
+    fun `imu only does not require a rotation vector sensor`() {
+        val fixture = Fixture(supportsFixedMode = false, supportsImuOnly = true)
+        fixture.location.permissionGranted = false
+        val recording = Recording()
+
+        fixture.repository.start(TrackingMode.IMU_ONLY, recording)
+        fixture.worker.runAll()
+        fixture.main.runAll()
+
+        assertEquals(listOf(TrackingMode.IMU_ONLY), recording.modes)
+        assertEquals(1, fixture.motion.registerCount)
+        assertEquals(0, fixture.location.requestCount)
+    }
+
+    @Test
+    fun `imu only sensor failure starts functional handheld fallback`() {
+        val fixture = Fixture()
+        fixture.motion.registrationSucceeds = false
+        val recording = Recording()
+
+        fixture.repository.start(TrackingMode.IMU_ONLY, recording)
+        fixture.worker.runAll()
+        fixture.main.runAll()
+
+        assertEquals(1, fixture.location.requestCount)
+        assertEquals(listOf(TrackingMode.HANDHELD), recording.modes)
+        assertTrue(recording.errors.isEmpty())
+        verify(fixture.estimator).reset(TrackingMode.HANDHELD)
+    }
+
+    @Test
+    fun `imu only sensor failure requests permission before handheld fallback`() {
+        val fixture = Fixture()
+        fixture.motion.registrationSucceeds = false
+        fixture.location.permissionGranted = false
+        val recording = Recording()
+
+        fixture.repository.start(TrackingMode.IMU_ONLY, recording)
+        fixture.worker.runAll()
+        fixture.main.runAll()
+
+        assertEquals(0, fixture.location.requestCount)
+        assertEquals(1, recording.permissionRequests)
+        assertTrue(recording.modes.isEmpty())
+    }
+
+    @Test
+    fun `failed imu to fixed transition becomes functional handheld mode`() {
+        val fixture = Fixture()
+        val recording = Recording()
+        fixture.repository.start(TrackingMode.IMU_ONLY, recording)
+        fixture.worker.runAll()
+        fixture.main.runAll()
+        fixture.motion.registrationSucceeds = false
+
+        fixture.repository.setTrackingMode(TrackingMode.FIXED)
+        fixture.worker.runAll()
+        fixture.main.runAll()
+
+        assertEquals(1, fixture.location.requestCount)
+        assertEquals(TrackingMode.HANDHELD, recording.modes.last())
+        verify(fixture.estimator).setTrackingMode(TrackingMode.HANDHELD)
+    }
+
+    @Test
     fun `explicit fixed request retries after sensor fallback`() {
         val fixture = Fixture()
         fixture.motion.registrationSucceeds = false
@@ -265,11 +347,14 @@ class SpeedRepositoryImplTest {
         whenever(location.speed).thenReturn(5f)
     }
 
-    private class Fixture {
+    private class Fixture(
+        supportsFixedMode: Boolean = true,
+        supportsImuOnly: Boolean = true
+    ) {
         val worker = FakeWorker()
         val main = FakeMainDispatcher()
         val location = FakeLocationGateway()
-        val motion = FakeMotionGateway()
+        val motion = FakeMotionGateway(supportsFixedMode, supportsImuOnly)
         val estimator = mock<SpeedEstimator>()
         val repository: SpeedRepositoryImpl
 
@@ -397,13 +482,15 @@ class SpeedRepositoryImplTest {
         }
     }
 
-    private class FakeMotionGateway : RepositoryMotionGateway {
-        override val supportsFixedMode = true
+    private class FakeMotionGateway(
+        override val supportsFixedMode: Boolean,
+        override val supportsImuOnly: Boolean
+    ) : RepositoryMotionGateway {
         var registrationSucceeds = true
         var registerCount = 0
         var unregisterCount = 0
 
-        override fun register(listener: SensorEventListener): Boolean {
+        override fun register(listener: SensorEventListener, includeRotation: Boolean): Boolean {
             registerCount++
             return registrationSucceeds
         }

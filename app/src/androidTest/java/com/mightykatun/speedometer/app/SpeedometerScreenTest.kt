@@ -1,5 +1,8 @@
 package com.mightykatun.speedometer.app
 
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -19,7 +22,8 @@ class SpeedometerScreenTest {
     @Test
     fun controlsInvokeTheirCallbacks() {
         var unitClicks = 0
-        var requestedFixedMode: Boolean? = null
+        var modeClicks = 0
+        var resetClicks = 0
         var pipClicks = 0
 
         composeRule.setContent {
@@ -31,23 +35,30 @@ class SpeedometerScreenTest {
                 speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
                 trackingMode = TrackingMode.HANDHELD,
                 supportsFixedMode = true,
+                supportsImuOnly = true,
                 supportsPip = true,
                 permissionMessage = null,
                 onSpeedUnitClick = { unitClicks++ },
-                onTrackingModeChange = { requestedFixedMode = it },
+                onTrackingModeChange = { modeClicks++ },
+                onReset = { resetClicks++ },
                 onEnterPip = { pipClicks++ },
                 onRequestPermission = {},
-                onOpenSettings = {}
+                onOpenSettings = {},
+                onUseImu = {}
             )
         }
 
         composeRule.onNodeWithText("km/h").performClick()
-        composeRule.onNodeWithContentDescription("Tracking mode").performClick()
+        composeRule.onNodeWithContentDescription("Tracking mode")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "gnss"))
+            .performClick()
+        composeRule.onNodeWithText("reset").performClick()
         composeRule.onNodeWithText("float").performClick()
 
         composeRule.runOnIdle {
             assertEquals(1, unitClicks)
-            assertEquals(true, requestedFixedMode)
+            assertEquals(1, modeClicks)
+            assertEquals(1, resetClicks)
             assertEquals(1, pipClicks)
         }
     }
@@ -56,6 +67,7 @@ class SpeedometerScreenTest {
     fun permissionRecoveryExposesRetryAndSettingsActions() {
         var retryClicks = 0
         var settingsClicks = 0
+        var imuClicks = 0
 
         composeRule.setContent {
             SpeedometerScreen(
@@ -66,24 +78,29 @@ class SpeedometerScreenTest {
                 speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
                 trackingMode = TrackingMode.HANDHELD,
                 supportsFixedMode = true,
+                supportsImuOnly = true,
                 supportsPip = true,
                 permissionMessage = "Precise location is required",
                 onSpeedUnitClick = {},
                 onTrackingModeChange = {},
+                onReset = {},
                 onEnterPip = {},
                 onRequestPermission = { retryClicks++ },
-                onOpenSettings = { settingsClicks++ }
+                onOpenSettings = { settingsClicks++ },
+                onUseImu = { imuClicks++ }
             )
         }
 
         composeRule.onNodeWithText("Precise location is required").assertIsDisplayed()
         composeRule.onNodeWithText("grant location").performClick()
         composeRule.onNodeWithText("open settings").performClick()
+        composeRule.onNodeWithText("use imu only").performClick()
         composeRule.onNodeWithText("float").assertDoesNotExist()
 
         composeRule.runOnIdle {
             assertEquals(1, retryClicks)
             assertEquals(1, settingsClicks)
+            assertEquals(1, imuClicks)
         }
     }
 }

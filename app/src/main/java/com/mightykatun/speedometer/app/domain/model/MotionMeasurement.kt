@@ -9,5 +9,11 @@ data class MotionMeasurement(
     val deviceRollRadians: Double,
     val orientationReliable: Boolean,
     val timestampNanos: Long,
-    val orientationTimestampNanos: Long = timestampNanos
+    val orientationTimestampNanos: Long = timestampNanos,
+    val accelerationDeviceXMetersPerSecondSquared: Double =
+        accelerationEastMetersPerSecondSquared,
+    val accelerationDeviceYMetersPerSecondSquared: Double =
+        accelerationMagneticNorthMetersPerSecondSquared,
+    val accelerationDeviceZMetersPerSecondSquared: Double =
+        accelerationUpMetersPerSecondSquared
 )

@@ -7,6 +7,7 @@ import com.mightykatun.speedometer.app.domain.model.SessionConfig
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
@@ -52,15 +53,12 @@ class SpeedometerViewModelTest {
     }
 
     @Test
-    fun `uncertainty display updates at most once per second`() {
+    fun `uncertainty remains paired with the current speed estimate`() {
         whenever(clock.elapsedRealtimeMillis()).thenReturn(0L, 1000L, 1100L, 2000L)
         viewModel.onSessionStart()
 
         viewModel.onSpeedEstimateReceived(estimate(5.0, EstimateQuality.TRACKING, 0.2, 1_000_000_000L))
         viewModel.onSpeedEstimateReceived(estimate(5.0, EstimateQuality.TRACKING, 0.8, 1_500_000_000L))
-        assertEquals(0.72f, viewModel.state.speedAccuracyKmh!!, 0.001f)
-
-        viewModel.onSpeedEstimateReceived(estimate(5.0, EstimateQuality.TRACKING, 0.8, 2_000_000_000L))
         assertEquals(2.88f, viewModel.state.speedAccuracyKmh!!, 0.001f)
     }
 
@@ -88,6 +86,46 @@ class SpeedometerViewModelTest {
         viewModel.onSessionStart()
 
         assertEquals(18f, viewModel.state.currentSpeedKmh!!, 0.001f)
+    }
+
+    @Test
+    fun `speed trend is smoothed bounded and cleared with the session`() {
+        whenever(clock.elapsedRealtimeMillis()).thenReturn(0L)
+        viewModel.onSessionStart()
+        viewModel.onSpeedEstimateReceived(
+            estimate(10.0, EstimateQuality.TRACKING, timestampNanos = 1_000_000_000L)
+        )
+        viewModel.onSpeedEstimateReceived(
+            estimate(20.0, EstimateQuality.TRACKING, timestampNanos = 2_000_000_000L)
+        )
+
+        val trend = viewModel.state.speedTrend
+        assertEquals(2, trend.size)
+        assertEquals(36f, trend.first().speedKmh!!, 0.001f)
+        assertTrue(trend.last().speedKmh!! in 36f..72f)
+
+        for (index in 101..1_750) {
+            viewModel.onSpeedEstimateReceived(
+                estimate(
+                    20.0,
+                    EstimateQuality.TRACKING,
+                    timestampNanos = index * 20_000_000L
+                )
+            )
+        }
+        assertTrue(viewModel.state.speedTrend.size <= 360)
+        assertTrue(
+            viewModel.state.speedTrend.first().timestampNanos >=
+                viewModel.state.speedTrend.last().timestampNanos - 30_000_000_000L
+        )
+        assertTrue(
+            viewModel.state.speedTrend.last().timestampNanos -
+                viewModel.state.speedTrend.first().timestampNanos >= 29_000_000_000L
+        )
+
+        viewModel.onSessionReset()
+
+        assertEquals(emptyList<Any>(), viewModel.state.speedTrend)
     }
 
     private fun estimate(

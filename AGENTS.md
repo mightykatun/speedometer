@@ -123,6 +123,7 @@ try {
 
 ```
 app/src/main/java/com/mightykatun/speedometer/app/
+├── AccuracyLevel.kt                  # Presentation uncertainty bands
 ├── MainActivity.kt                    # Activity and UI composition
 ├── SpeedRepositoryViewModel.kt        # Configuration-stable repository owner
 ├── SpeedometerViewModel.kt            # State management and UI logic
@@ -136,6 +137,7 @@ app/src/main/java/com/mightykatun/speedometer/app/
 │   │   ├── SpeedEstimatorConfig.kt
 │   │   ├── TrackingMode.kt
 │   │   ├── SpeedometerState.kt
+│   │   ├── SpeedTrendSample.kt
 │   │   ├── SpeedUnit.kt
 │   │   ├── SessionConfig.kt
 │   │   └── SessionStatistics.kt
@@ -211,8 +213,8 @@ If `keystore.properties` doesn't exist, release builds will run unsigned for deb
 - **Battery-conscious**: GPS and motion listeners are disconnected when the Activity stops outside configuration recreation
 - **Session-based**: All data resets when app goes to background
 - **Real-time**: Uses one HandlerThread for ordered GNSS and motion processing
-- **Accuracy-aware**: GNSS speed remains authoritative; IMU prediction is bounded to short gaps
-- **Mode-aware**: Handheld mode ignores motion sensors; fixed mode requires a rigid mount
+- **Accuracy-aware**: GNSS is the absolute source in `gnss` and `gnss+imu`; zero-seeded `imu` is explicitly relative and uncertainty-bounded
+- **Mode-aware**: Handheld mode ignores motion sensors, fixed mode requires a rigid mount, and IMU-only requires a stopped reset with the phone's top edge forward
 
 ## Common Tasks
 

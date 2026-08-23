@@ -7,12 +7,13 @@ import androidx.lifecycle.ViewModel
 import com.mightykatun.speedometer.app.domain.SessionStatisticsTracker
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import com.mightykatun.speedometer.app.domain.model.SpeedometerState
+import com.mightykatun.speedometer.app.domain.model.SpeedTrendSample
+import kotlin.math.exp
 
 class SpeedometerViewModel(
     private val sessionTracker: SessionStatisticsTracker
 ) : ViewModel() {
 
-    private var lastAccuracyUpdateNanos = Long.MIN_VALUE
     private var sessionActive = false
     private var gpsErrorActive = false
 
@@ -30,20 +31,12 @@ class SpeedometerViewModel(
         val measuredAccuracyKmh = estimate.uncertaintyMetersPerSecond
             .takeIf { it.isFinite() }
             ?.let { (it * 3.6).toFloat() }
-        val shouldRefreshAccuracy = measuredAccuracyKmh != null &&
-            (state.speedAccuracyKmh == null || lastAccuracyUpdateNanos == Long.MIN_VALUE ||
-                estimate.timestampNanos - lastAccuracyUpdateNanos >= ACCURACY_UPDATE_PERIOD_NANOS)
-        if (shouldRefreshAccuracy) lastAccuracyUpdateNanos = estimate.timestampNanos
-
         state = state.copy(
             currentSpeedKmh = stats.currentSpeedKmh,
-            speedAccuracyKmh = when {
-                measuredAccuracyKmh == null -> null
-                shouldRefreshAccuracy -> measuredAccuracyKmh
-                else -> state.speedAccuracyKmh
-            },
+            speedAccuracyKmh = measuredAccuracyKmh,
             estimateQuality = estimate.quality,
-            maxSpeedKmh = stats.maxSpeedKmh
+            maxSpeedKmh = stats.maxSpeedKmh,
+            speedTrend = updatedSpeedTrend(estimate.timestampNanos, stats.currentSpeedKmh)
         )
     }
 
@@ -64,7 +57,6 @@ class SpeedometerViewModel(
     fun onSessionReset() {
         sessionActive = false
         sessionTracker.reset()
-        lastAccuracyUpdateNanos = Long.MIN_VALUE
         state = SpeedometerState()
         errorMessage = null
         warningMessage = null
@@ -92,7 +84,34 @@ class SpeedometerViewModel(
         }
     }
 
+    private fun updatedSpeedTrend(timestampNanos: Long, speedKmh: Float?): List<SpeedTrendSample> {
+        if (timestampNanos <= 0L) return state.speedTrend
+        val latest = state.speedTrend.lastOrNull()
+        if (latest != null && timestampNanos < latest.timestampNanos) return state.speedTrend
+        if (latest != null && timestampNanos - latest.timestampNanos < TREND_SAMPLE_PERIOD_NANOS) {
+            return state.speedTrend
+        }
+        val existing = state.speedTrend
+        val previous = existing.lastOrNull()
+
+        val smoothedSpeed = if (speedKmh == null || previous?.speedKmh == null) {
+            speedKmh
+        } else {
+            val elapsedSeconds = (timestampNanos - previous.timestampNanos) / NANOS_PER_SECOND
+            val alpha = (1.0 - exp(-elapsedSeconds / TREND_SMOOTHING_SECONDS)).coerceIn(0.0, 1.0)
+            (previous.speedKmh + alpha.toFloat() * (speedKmh - previous.speedKmh))
+        }
+        val cutoff = timestampNanos - TREND_WINDOW_NANOS
+        return (existing + SpeedTrendSample(timestampNanos, smoothedSpeed))
+            .dropWhile { it.timestampNanos < cutoff }
+            .takeLast(MAX_TREND_SAMPLES)
+    }
+
     private companion object {
-        const val ACCURACY_UPDATE_PERIOD_NANOS = 1_000_000_000L
+        const val TREND_WINDOW_NANOS = 30_000_000_000L
+        const val TREND_SAMPLE_PERIOD_NANOS = 100_000_000L
+        const val NANOS_PER_SECOND = 1_000_000_000.0
+        const val TREND_SMOOTHING_SECONDS = 0.55
+        const val MAX_TREND_SAMPLES = 360
     }
 }

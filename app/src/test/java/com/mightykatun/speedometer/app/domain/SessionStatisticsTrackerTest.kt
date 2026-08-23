@@ -29,8 +29,8 @@ class SessionStatisticsTrackerTest {
         tracker.startSession()
         tracker.updateSpeed(update(10.0, seconds(10)))
 
-        val before = tracker.updateSpeed(update(20.0, seconds(10), upsert(1, 20.0, seconds(14) + 900_000_000L)))
-        val atBoundary = tracker.updateSpeed(update(20.0, seconds(10), upsert(2, 20.0, seconds(15))))
+        val before = tracker.updateSpeed(update(20.0, seconds(10), upsert(1, 20.0, seconds(11) + 900_000_000L)))
+        val atBoundary = tracker.updateSpeed(update(20.0, seconds(10), upsert(2, 20.0, seconds(12))))
 
         assertEquals(0f, before.maxSpeedKmh, 0.01f)
         assertEquals(72f, atBoundary.maxSpeedKmh, 0.01f)
@@ -164,6 +164,44 @@ class SessionStatisticsTrackerTest {
         val replayedMaximum = result(listOf(first, later, last, delayed))
 
         assertEquals(chronologicalMaximum, replayedMaximum, 0f)
+    }
+
+    @Test
+    fun `GNSS mode switch preserves an eligible maximum and rejects the first outlier`() {
+        val estimator = SpeedEstimator()
+        val localTracker = SessionStatisticsTracker(SessionConfig(), TestClock())
+        localTracker.startSession()
+        localTracker.updateSpeed(estimator.onGnssMeasurement(gnss(10.0, seconds(1))))
+        val beforeSwitch = localTracker.updateSpeed(
+            estimator.onGnssMeasurement(gnss(12.0, seconds(3)))
+        )
+
+        estimator.setTrackingMode(com.mightykatun.speedometer.app.domain.model.TrackingMode.FIXED)
+        localTracker.updateSpeed(estimator.snapshotAt(seconds(3)))
+        val afterOutlier = localTracker.updateSpeed(
+            estimator.onGnssMeasurement(gnss(50.0, seconds(4)))
+        )
+
+        assertEquals(43.2f, beforeSwitch.maxSpeedKmh, 0.01f)
+        assertEquals(beforeSwitch.maxSpeedKmh, afterOutlier.maxSpeedKmh, 0f)
+    }
+
+    @Test
+    fun `GNSS mode switch preserves the original maximum warmup boundary`() {
+        val estimator = SpeedEstimator()
+        val localTracker = SessionStatisticsTracker(SessionConfig(), TestClock())
+        localTracker.startSession()
+        localTracker.updateSpeed(estimator.onGnssMeasurement(gnss(10.0, seconds(1))))
+        localTracker.updateSpeed(estimator.onGnssMeasurement(gnss(11.0, seconds(2))))
+
+        estimator.setTrackingMode(com.mightykatun.speedometer.app.domain.model.TrackingMode.FIXED)
+        val duringWarmup = localTracker.updateSpeed(estimator.snapshotAt(seconds(2)))
+        val atBoundary = localTracker.updateSpeed(
+            estimator.onGnssMeasurement(gnss(12.0, seconds(3)))
+        )
+
+        assertEquals(0f, duringWarmup.maxSpeedKmh, 0f)
+        assertEquals(43.2f, atBoundary.maxSpeedKmh, 0.01f)
     }
 
     @Test

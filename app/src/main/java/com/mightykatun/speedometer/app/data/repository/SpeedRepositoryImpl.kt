@@ -46,6 +46,7 @@ class SpeedRepositoryImpl private constructor(
     private val stopEpoch = AtomicLong()
 
     override val supportsFixedMode: Boolean = motionGateway.supportsFixedMode
+    override val supportsImuOnly: Boolean = motionGateway.supportsImuOnly
 
     // All fields below are mutated only by the repository worker.
     private var lifecycle = Lifecycle.STOPPED
@@ -170,7 +171,7 @@ class SpeedRepositoryImpl private constructor(
 
         private val locationListener = object : LocationListener {
             override fun onLocationChanged(location: Location) {
-                if (!isCurrent()) return
+                if (!isCurrent() || effectiveMode == TrackingMode.IMU_ONLY) return
                 val measurement = createMeasurement(location)
                 estimator.ingestGnssMeasurement(measurement)
                 if (measurement.speedMetersPerSecond != null) emitGnssAvailable()
@@ -223,10 +224,24 @@ class SpeedRepositoryImpl private constructor(
         }
 
         fun start(requestedMode: TrackingMode): Boolean {
-            if (!registerLocationCallbacks()) return false
-
-            val fixedModeActive = requestedMode == TrackingMode.FIXED && registerSensors()
-            effectiveMode = if (fixedModeActive) TrackingMode.FIXED else TrackingMode.HANDHELD
+            effectiveMode = when (requestedMode) {
+                TrackingMode.IMU_ONLY -> {
+                    if (!registerSensors(includeRotation = false)) {
+                        if (!registerLocationCallbacks()) return false
+                        TrackingMode.HANDHELD
+                    } else {
+                        TrackingMode.IMU_ONLY
+                    }
+                }
+                TrackingMode.FIXED -> {
+                    if (!registerLocationCallbacks()) return false
+                    if (registerSensors(includeRotation = true)) TrackingMode.FIXED else TrackingMode.HANDHELD
+                }
+                TrackingMode.HANDHELD -> {
+                    if (!registerLocationCallbacks()) return false
+                    TrackingMode.HANDHELD
+                }
+            }
             estimator.reset(effectiveMode)
             clearSatelliteEvidence()
             emitTrackingModeChanged(effectiveMode)
@@ -263,21 +278,39 @@ class SpeedRepositoryImpl private constructor(
                 return
             }
 
-            if (requestedMode == TrackingMode.HANDHELD) {
-                unregisterSensors()
-                effectiveMode = TrackingMode.HANDHELD
-                estimator.setTrackingMode(effectiveMode)
-                emitTrackingModeChanged(effectiveMode)
-                emitEstimate(estimator.snapshotAt(worker.elapsedRealtimeNanos()))
-                return
+            val nextMode = when (requestedMode) {
+                TrackingMode.IMU_ONLY -> {
+                    if (!registerSensors(includeRotation = false)) {
+                        if (!locationRegistered && !registerLocationCallbacks()) return
+                        effectiveMode = TrackingMode.HANDHELD
+                        estimator.setTrackingMode(effectiveMode)
+                        emitTrackingModeChanged(effectiveMode)
+                        emitEstimate(estimator.snapshotAt(worker.elapsedRealtimeNanos()))
+                        return
+                    }
+                    cleanupLocationCallbacks()
+                    clearSatelliteEvidence()
+                    TrackingMode.IMU_ONLY
+                }
+                TrackingMode.FIXED -> {
+                    if (!locationRegistered && !registerLocationCallbacks()) return
+                    if (!registerSensors(includeRotation = true)) {
+                        effectiveMode = TrackingMode.HANDHELD
+                        estimator.setTrackingMode(effectiveMode)
+                        emitTrackingModeChanged(effectiveMode)
+                        emitEstimate(estimator.snapshotAt(worker.elapsedRealtimeNanos()))
+                        return
+                    }
+                    TrackingMode.FIXED
+                }
+                TrackingMode.HANDHELD -> {
+                    if (!locationRegistered && !registerLocationCallbacks()) return
+                    unregisterSensors()
+                    TrackingMode.HANDHELD
+                }
             }
 
-            if (!registerSensors()) {
-                emitTrackingModeChanged(TrackingMode.HANDHELD)
-                return
-            }
-
-            effectiveMode = TrackingMode.FIXED
+            effectiveMode = nextMode
             estimator.setTrackingMode(effectiveMode)
             emitTrackingModeChanged(effectiveMode)
             emitEstimate(estimator.snapshotAt(worker.elapsedRealtimeNanos()))
@@ -318,11 +351,14 @@ class SpeedRepositoryImpl private constructor(
             locationRegistered = false
         }
 
-        private fun registerSensors(): Boolean {
+        private fun registerSensors(includeRotation: Boolean): Boolean {
             unregisterSensors()
             resetSensorState()
-            if (!supportsFixedMode || !isCurrent()) return false
-            sensorsRegistered = runCatching { motionGateway.register(sensorListener) }.getOrDefault(false)
+            val supported = if (includeRotation) supportsFixedMode else supportsImuOnly
+            if (!supported || !isCurrent()) return false
+            sensorsRegistered = runCatching {
+                motionGateway.register(sensorListener, includeRotation)
+            }.getOrDefault(false)
             if (!sensorsRegistered) runCatching { motionGateway.unregister(sensorListener) }
             return sensorsRegistered
         }
@@ -401,13 +437,33 @@ class SpeedRepositoryImpl private constructor(
 
         private fun updateAcceleration(event: SensorEvent) {
             val orientationAgeNanos = event.timestamp - lastRotationTimestampNanos
-            if (!sensorsRegistered || lastRotationTimestampNanos == 0L ||
-                orientationAgeNanos !in 0..MAX_ORIENTATION_AGE_NANOS
-            ) return
-
+            if (!sensorsRegistered) return
             val deviceX = event.values[0]
             val deviceY = event.values[1]
             val deviceZ = event.values[2]
+            if (effectiveMode == TrackingMode.IMU_ONLY) {
+                estimator.ingestMotionMeasurement(
+                    MotionMeasurement(
+                        accelerationEastMetersPerSecondSquared = deviceX.toDouble(),
+                        accelerationMagneticNorthMetersPerSecondSquared = deviceY.toDouble(),
+                        accelerationUpMetersPerSecondSquared = deviceZ.toDouble(),
+                        deviceYawRadians = 0.0,
+                        devicePitchRadians = 0.0,
+                        deviceRollRadians = 0.0,
+                        orientationReliable = false,
+                        timestampNanos = event.timestamp,
+                        orientationTimestampNanos = event.timestamp,
+                        accelerationDeviceXMetersPerSecondSquared = deviceX.toDouble(),
+                        accelerationDeviceYMetersPerSecondSquared = deviceY.toDouble(),
+                        accelerationDeviceZMetersPerSecondSquared = deviceZ.toDouble()
+                    )
+                )
+                return
+            }
+            if (lastRotationTimestampNanos == 0L ||
+                orientationAgeNanos !in 0..MAX_ORIENTATION_AGE_NANOS
+            ) return
+
             val east = rotationMatrix[0] * deviceX + rotationMatrix[1] * deviceY + rotationMatrix[2] * deviceZ
             val north = rotationMatrix[3] * deviceX + rotationMatrix[4] * deviceY + rotationMatrix[5] * deviceZ
             val up = rotationMatrix[6] * deviceX + rotationMatrix[7] * deviceY + rotationMatrix[8] * deviceZ
@@ -421,7 +477,10 @@ class SpeedRepositoryImpl private constructor(
                     deviceRollRadians = orientation[2].toDouble(),
                     orientationReliable = rotationReliable,
                     timestampNanos = event.timestamp,
-                    orientationTimestampNanos = lastRotationTimestampNanos
+                    orientationTimestampNanos = lastRotationTimestampNanos,
+                    accelerationDeviceXMetersPerSecondSquared = deviceX.toDouble(),
+                    accelerationDeviceYMetersPerSecondSquared = deviceY.toDouble(),
+                    accelerationDeviceZMetersPerSecondSquared = deviceZ.toDouble()
                 )
             )
         }
