@@ -5,5 +5,8 @@ data class SpeedEstimate(
     val uncertaintyMetersPerSecond: Double,
     val quality: EstimateQuality,
     val trustedForMaximum: Boolean,
-    val timestampNanos: Long
+    val timestampNanos: Long,
+    val maximumCandidateMetersPerSecond: Double? = null,
+    val maximumCandidateTimestampNanos: Long = 0L,
+    val maximumCandidateSatelliteCount: Int = 0
 )

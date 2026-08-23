@@ -87,6 +87,9 @@ class SpeedometerViewModelTest {
         uncertaintyMetersPerSecond = uncertainty,
         quality = quality,
         trustedForMaximum = quality == EstimateQuality.TRACKING,
-        timestampNanos = timestampNanos
+        timestampNanos = timestampNanos,
+        maximumCandidateMetersPerSecond = speed.takeIf { quality == EstimateQuality.TRACKING },
+        maximumCandidateTimestampNanos = timestampNanos,
+        maximumCandidateSatelliteCount = 3
     )
 }

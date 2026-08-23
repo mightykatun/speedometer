@@ -19,7 +19,7 @@ class SessionStatisticsTrackerTest {
         tracker.startSession()
         tracker.updateSatelliteCount(5)
 
-        val stats = tracker.updateSpeed(estimate(10.0, trusted = true))
+        val stats = tracker.updateSpeed(estimate(10.0, trusted = true, candidateTimestamp = 1_000_000_000L))
 
         assertEquals(36f, stats.currentSpeedKmh!!, 0.01f)
         assertEquals(0f, stats.maxSpeedKmh, 0.01f)
@@ -37,6 +37,18 @@ class SessionStatisticsTrackerTest {
     }
 
     @Test
+    fun `maximum uses the raw GNSS candidate instead of fused display speed`() {
+        whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 6000L)
+        tracker.startSession()
+        tracker.updateSatelliteCount(5)
+
+        val stats = tracker.updateSpeed(estimate(20.0, trusted = true, maximumCandidate = 18.0))
+
+        assertEquals(72f, stats.currentSpeedKmh!!, 0.01f)
+        assertEquals(64.8f, stats.maxSpeedKmh, 0.01f)
+    }
+
+    @Test
     fun `degraded estimate cannot update maximum`() {
         whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 6000L)
         tracker.startSession()
@@ -49,12 +61,25 @@ class SessionStatisticsTrackerTest {
     }
 
     @Test
-    fun `maximum speed still requires minimum satellites`() {
+    fun `maximum candidate rejected before warmup is not admitted by a later tick`() {
+        whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 4900L, 5100L)
+        tracker.startSession()
+        tracker.updateSatelliteCount(5)
+        val candidate = estimate(20.0, trusted = true, candidateTimestamp = 4_900_000_000L)
+
+        tracker.updateSpeed(candidate)
+        val stats = tracker.updateSpeed(candidate)
+
+        assertEquals(0f, stats.maxSpeedKmh, 0.01f)
+    }
+
+    @Test
+    fun `maximum speed requires minimum satellites on the originating fix`() {
         whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 6000L)
         tracker.startSession()
-        tracker.updateSatelliteCount(2)
+        tracker.updateSatelliteCount(5)
 
-        val stats = tracker.updateSpeed(estimate(20.0, trusted = true))
+        val stats = tracker.updateSpeed(estimate(20.0, trusted = true, candidateSatellites = 2))
 
         assertEquals(0f, stats.maxSpeedKmh, 0.01f)
     }
@@ -83,11 +108,20 @@ class SessionStatisticsTrackerTest {
         assertEquals(0f, stats.maxSpeedKmh, 0.01f)
     }
 
-    private fun estimate(speed: Double?, trusted: Boolean) = SpeedEstimate(
+    private fun estimate(
+        speed: Double?,
+        trusted: Boolean,
+        maximumCandidate: Double? = speed.takeIf { trusted },
+        candidateTimestamp: Long = 6_000_000_000L,
+        candidateSatellites: Int = 3
+    ) = SpeedEstimate(
         speedMetersPerSecond = speed,
         uncertaintyMetersPerSecond = 0.2,
         quality = if (trusted) EstimateQuality.TRACKING else EstimateQuality.DEGRADED,
         trustedForMaximum = trusted,
-        timestampNanos = 1L
+        timestampNanos = candidateTimestamp,
+        maximumCandidateMetersPerSecond = maximumCandidate,
+        maximumCandidateTimestampNanos = candidateTimestamp.takeIf { maximumCandidate != null } ?: 0L,
+        maximumCandidateSatelliteCount = candidateSatellites
     )
 }

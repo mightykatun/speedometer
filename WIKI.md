@@ -64,9 +64,11 @@ Accuracy states:
 1. Uses `TYPE_ROTATION_VECTOR` to transform device acceleration into magnetic East/North/Up.
 2. Anchors travel direction with a quality-gated GNSS bearing and local magnetic declination.
 3. Tracks turns between GNSS fixes from relative yaw change.
-4. Projects horizontal acceleration along the current travel direction.
-5. Predicts speed and acceleration bias between GNSS corrections.
-6. Falls back to GNSS-only whenever orientation, course, timestamp, or sensor quality is inadequate.
+4. Projects horizontal acceleration into longitudinal and lateral components.
+5. Rejects spikes with a median filter and smooths accepted acceleration by elapsed time rather than sample count.
+6. Increases process uncertainty for lateral motion, vertical motion, and unstable acceleration.
+7. Predicts speed and acceleration bias only inside a time- and uncertainty-based physical envelope.
+8. Quarantines violent handling and falls back to GNSS-only whenever orientation, course, timestamp, or sensor quality is inadequate.
 
 `gnss+imu` does not promise tunnel navigation. Inertial propagation is limited to three seconds because consumer accelerometer bias creates rapidly growing velocity error.
 
@@ -103,7 +105,7 @@ GNSS satellite callbacks only update satellite state. They never replay a cached
 - Satellites used in fix
 - `Location.elapsedRealtimeNanos` measurement time
 
-`MotionMeasurement` preserves transformed East/North/Up linear acceleration, device yaw/pitch/roll, orientation reliability, and `SensorEvent.timestamp`.
+`MotionMeasurement` preserves transformed East/North/Up linear acceleration, device yaw/pitch/roll, orientation reliability, the acceleration timestamp, and the exact rotation-vector timestamp used for that transform.
 
 Both timestamps use Android's elapsed-realtime-since-boot timebase. Callback arrival time and wall-clock time are not used for filtering.
 
@@ -118,9 +120,11 @@ sigma = max(reportedSpeedAccuracy, 0.2 m/s)
 R = (1.5 * sigma)^2
 ```
 
-Missing speed accuracy receives a conservative `2.0 m/s` uncertainty. Measurements above `3.0 m/s` reported uncertainty do not correct the estimate. Poor horizontal position accuracy alone does not force speed to zero.
+Missing speed accuracy receives a conservative `2.0 m/s` uncertainty. Measurements above `2.0 m/s` reported uncertainty do not correct the estimate. Poor horizontal position accuracy alone does not force speed to zero.
 
-An innovation gate rejects isolated statistically implausible speed jumps. Three consecutive high-quality, mutually consistent fixes trigger controlled reacquisition so the filter cannot lock out after a genuine speed change or GNSS outage.
+An innovation gate rejects isolated statistically implausible speed jumps. Two consecutive high-quality, mutually consistent fixes trigger controlled reacquisition so the filter cannot lock out after a genuine speed change or GNSS outage. Reacquired speed remains in maximum-speed probation until another in-gate GNSS fix confirms it.
+
+Displayed speed may be a fused estimate, but session maximum consumes a separate raw, accepted GNSS candidate. Inertial prediction can never inflate the recorded maximum.
 
 ### Fixed-Mode Prediction
 
@@ -133,6 +137,8 @@ bias' = bias
 ```
 
 All covariance calculations use `Double`. GNSS corrections use the Joseph covariance form for numerical stability.
+
+The acceleration channel uses a median-of-three prefilter and an exponential smoother with an `80 ms` time constant. Its covariance includes lateral/vertical projection leakage and measured sample instability. Acceleration is ignored when uncertainty exceeds the configured limit, and violent motion clears the course and starts a `500 ms` inertial quarantine. Prediction is rejected if it exceeds a physical envelope derived from the latest GNSS speed, GNSS uncertainty, elapsed time, and conservative acceleration/braking limits.
 
 ### Delayed Measurements
 
@@ -151,7 +157,7 @@ The internal Gaussian state is not clipped. Only the published result is constra
 | Condition | Result |
 |---|---|
 | No accepted speed | Acquiring, no number |
-| Recent correction with 2-sigma uncertainty at or below 1 m/s | Tracking |
+| Recent correction with 2-sigma uncertainty at or below 2.5 m/s | Tracking |
 | Correction age up to 3 seconds | Estimated/degraded number |
 | Correction older than 3 seconds | Unavailable, `--` |
 | Strong stationary evidence | Valid `0.00` |
@@ -177,7 +183,7 @@ No watchdog injects fake zero readings.
 | IMU sensors absent | Disable `gnss+imu` |
 | Orientation unreliable or stale | Continue GNSS-only |
 | Course absent or stale | Continue GNSS-only |
-| Gross phone movement | Drop the course anchor and require GNSS reacquisition |
+| Gross phone movement | Drop the course anchor, quarantine IMU prediction, and require a fresh course |
 | GNSS absent for more than 3 seconds | Mark speed unavailable |
 
 ## Architecture
@@ -218,7 +224,7 @@ Automated gates:
 ./gradlew clean test lint assembleDebug
 ```
 
-Estimator tests cover low-speed preservation, invalid measurements, uncertainty gating, outliers, reacquisition, GNSS isolation, GNSS + IMU prediction, course expiry, delayed replay, duplicate fixes, stationary evidence, mode reset, and stale-data unavailability.
+Estimator tests cover low-speed preservation, invalid measurements, uncertainty gating, outliers, reacquisition probation, raw-GNSS maximum candidates, GNSS isolation, robust GNSS + IMU prediction, spike/vertical-shock rejection, violent-motion quarantine, orientation freshness, sensor-rate invariance, course expiry, delayed replay, duplicate fixes, stationary evidence, mode reset, and stale-data unavailability.
 
 ## Field Validation
 

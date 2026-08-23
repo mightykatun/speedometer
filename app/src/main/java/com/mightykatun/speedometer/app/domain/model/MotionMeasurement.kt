@@ -8,5 +8,6 @@ data class MotionMeasurement(
     val devicePitchRadians: Double,
     val deviceRollRadians: Double,
     val orientationReliable: Boolean,
-    val timestampNanos: Long
+    val timestampNanos: Long,
+    val orientationTimestampNanos: Long = timestampNanos
 )

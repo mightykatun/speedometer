@@ -24,7 +24,6 @@ import com.mightykatun.speedometer.app.domain.model.GnssMeasurement
 import com.mightykatun.speedometer.app.domain.model.MotionMeasurement
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import com.mightykatun.speedometer.app.domain.model.TrackingMode
-import kotlin.math.abs
 
 class SpeedRepositoryImpl(
     context: Context,
@@ -297,15 +296,16 @@ class SpeedRepositoryImpl(
             SensorManager.getOrientation(rotationMatrix, orientation)
             lastRotationTimestampNanos = event.timestamp
             val headingAccuracy = event.values.getOrNull(4)?.toDouble()
+                ?.takeIf { it.isFinite() && it >= 0.0 }
             rotationReliable = event.accuracy != SensorManager.SENSOR_STATUS_UNRELIABLE &&
-                (headingAccuracy == null || headingAccuracy < 0.0 ||
-                    headingAccuracy <= MAX_HEADING_ACCURACY_RADIANS)
+                (headingAccuracy?.let { it <= MAX_HEADING_ACCURACY_RADIANS }
+                    ?: (event.accuracy >= SensorManager.SENSOR_STATUS_ACCURACY_MEDIUM))
         }
 
         private fun updateAcceleration(event: SensorEvent) {
+            val orientationAgeNanos = event.timestamp - lastRotationTimestampNanos
             if (!sensorsRegistered || lastRotationTimestampNanos == 0L ||
-                abs(event.timestamp - lastRotationTimestampNanos) > MAX_ORIENTATION_AGE_NANOS
-            ) return
+                orientationAgeNanos !in 0..MAX_ORIENTATION_AGE_NANOS) return
 
             val deviceX = event.values[0]
             val deviceY = event.values[1]
@@ -322,7 +322,8 @@ class SpeedRepositoryImpl(
                     devicePitchRadians = orientation[1].toDouble(),
                     deviceRollRadians = orientation[2].toDouble(),
                     orientationReliable = rotationReliable,
-                    timestampNanos = event.timestamp
+                    timestampNanos = event.timestamp,
+                    orientationTimestampNanos = lastRotationTimestampNanos
                 )
             )
         }

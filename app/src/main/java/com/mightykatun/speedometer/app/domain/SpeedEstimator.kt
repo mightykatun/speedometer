@@ -9,6 +9,7 @@ import com.mightykatun.speedometer.app.domain.model.TrackingMode
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
@@ -27,7 +28,23 @@ class SpeedEstimator(
         data class Motion(val measurement: MotionMeasurement) : Input {
             override val timestampNanos: Long = measurement.timestampNanos
         }
+
+        data class Orientation(
+            val yawRadians: Double,
+            val pitchRadians: Double,
+            val rollRadians: Double,
+            val reliable: Boolean,
+            override val timestampNanos: Long
+        ) : Input
     }
+
+    private data class AccelerationProjection(
+        val longitudinal: Double,
+        val lateral: Double,
+        val vertical: Double
+    )
+
+    private data class AccelerationInput(val value: Double, val uncertainty: Double)
 
     private data class State(
         var initialized: Boolean = false,
@@ -39,12 +56,20 @@ class SpeedEstimator(
         var p11: Double = 0.25,
         var lastTimestampNanos: Long = 0L,
         var lastAcceptedGnssNanos: Long = 0L,
-        var lastYawRadians: Double? = null,
-        var lastPitchRadians: Double? = null,
-        var lastRollRadians: Double? = null,
-        var lastMotionNanos: Long = 0L,
+        var lastReliableYawRadians: Double? = null,
+        var lastReliablePitchRadians: Double? = null,
+        var lastReliableRollRadians: Double? = null,
+        var lastReliableOrientationNanos: Long = 0L,
         var lastLongitudinalAcceleration: Double? = null,
         var filteredLongitudinalAcceleration: Double? = null,
+        var filteredAccelerationNanos: Long = 0L,
+        var accelerationSample0: Double = 0.0,
+        var accelerationSample1: Double = 0.0,
+        var accelerationSample2: Double = 0.0,
+        var accelerationSampleCount: Int = 0,
+        var accelerationResidualVariance: Double = 0.0,
+        var inertialSystematicVariance: Double = 0.0,
+        var inertialSystematicUncertaintyExposure: Double = 0.0,
         var lastObservedLongitudinalAcceleration: Double? = null,
         var lastObservedAccelerationNanos: Long = 0L,
         var lastObservedHorizontalAcceleration: Double? = null,
@@ -57,7 +82,13 @@ class SpeedEstimator(
         var outlierCount: Int = 0,
         var outlierMeanSpeed: Double = 0.0,
         var outlierLastNanos: Long = 0L,
-        var inertialAnchorSpeed: Double? = null,
+        var lastGnssSpeed: Double? = null,
+        var lastGnssSigma: Double? = null,
+        var lastGnssSatelliteCount: Int = 0,
+        var lastGnssCorrectionNanos: Long = 0L,
+        var maximumTrustProbation: Boolean = false,
+        var imuQuarantinedUntilNanos: Long = 0L,
+        var recentAbruptOrientationNanos: Long = 0L,
         var stationaryCandidateNanos: Long = 0L,
         var stationaryFixCount: Int = 0,
         var stationary: Boolean = false,
@@ -69,12 +100,14 @@ class SpeedEstimator(
     private var mode = TrackingMode.HANDHELD
     private var state = State(p11 = config.initialBiasVariance)
     private var historyBase = state.copy()
+    private var historyBaseInputNanos = 0L
     private val history = mutableListOf<HistoryEntry>()
 
     fun reset(trackingMode: TrackingMode = mode) {
         mode = trackingMode
         state = State(p11 = config.initialBiasVariance)
         historyBase = state.copy()
+        historyBaseInputNanos = 0L
         history.clear()
     }
 
@@ -84,6 +117,9 @@ class SpeedEstimator(
 
     fun onGnssMeasurement(measurement: GnssMeasurement): SpeedEstimate {
         if (measurement.timestampNanos <= 0L) return estimateAt(latestTimestamp(measurement.timestampNanos))
+        if (measurement.timestampNanos <= historyBaseInputNanos) {
+            return estimateAt(latestTimestamp(measurement.timestampNanos))
+        }
         if (history.any { it.input is Input.Gnss && it.input.timestampNanos == measurement.timestampNanos }) {
             return estimateAt(latestTimestamp(measurement.timestampNanos))
         }
@@ -98,8 +134,23 @@ class SpeedEstimator(
     }
 
     fun onMotionMeasurement(measurement: MotionMeasurement): SpeedEstimate {
-        if (!isFiniteMotion(measurement)) return estimateAt(latestTimestamp(measurement.timestampNanos))
-        if (measurement.timestampNanos <= historyBase.lastTimestampNanos) {
+        if (!hasFiniteMotionValues(measurement)) return estimateAt(latestTimestamp(measurement.timestampNanos))
+        if (measurement.orientationTimestampNanos > historyBaseInputNanos && history.none {
+                it.input is Input.Orientation &&
+                    it.input.timestampNanos == measurement.orientationTimestampNanos
+            }
+        ) {
+            insertAndProcess(
+                Input.Orientation(
+                    yawRadians = measurement.deviceYawRadians,
+                    pitchRadians = measurement.devicePitchRadians,
+                    rollRadians = measurement.deviceRollRadians,
+                    reliable = measurement.orientationReliable,
+                    timestampNanos = measurement.orientationTimestampNanos
+                )
+            )
+        }
+        if (measurement.timestampNanos <= historyBaseInputNanos) {
             return estimateAt(latestTimestamp(measurement.timestampNanos))
         }
         insertAndProcess(Input.Motion(measurement))
@@ -126,21 +177,28 @@ class SpeedEstimator(
             else -> if (state.stationary) 0.0 else max(0.0, state.speed)
         }
 
+        val rawGnssUncertainty = state.lastGnssSigma?.let {
+            config.speedAccuracyInflation * max(it, config.minimumSpeedAccuracyMetersPerSecond)
+        } ?: Double.POSITIVE_INFINITY
+        val trustedForMaximum = quality == EstimateQuality.TRACKING && !state.stationary &&
+            !state.maximumTrustProbation && age <= config.maximumTrustedGnssAgeNanos &&
+            2.0 * rawGnssUncertainty <= config.maximumTrustedTwoSigmaMetersPerSecond
         return SpeedEstimate(
             speedMetersPerSecond = displaySpeed,
             uncertaintyMetersPerSecond = uncertainty,
             quality = quality,
-            trustedForMaximum = quality == EstimateQuality.TRACKING && !state.stationary &&
-                age <= config.maximumTrustedGnssAgeNanos &&
-                2.0 * uncertainty <= config.maximumTrustedTwoSigmaMetersPerSecond,
-            timestampNanos = timestampNanos
+            trustedForMaximum = trustedForMaximum,
+            timestampNanos = timestampNanos,
+            maximumCandidateMetersPerSecond = state.lastGnssSpeed.takeIf { trustedForMaximum },
+            maximumCandidateTimestampNanos = state.lastGnssCorrectionNanos.takeIf { trustedForMaximum } ?: 0L,
+            maximumCandidateSatelliteCount = state.lastGnssSatelliteCount.takeIf { trustedForMaximum } ?: 0
         )
     }
 
     private fun insertAndProcess(input: Input) {
         val insertionIndex = history.indexOfFirst {
             it.input.timestampNanos > input.timestampNanos ||
-                (it.input.timestampNanos == input.timestampNanos && input is Input.Motion && it.input is Input.Gnss)
+                it.input.timestampNanos == input.timestampNanos && inputPriority(input) < inputPriority(it.input)
         }.let { if (it < 0) history.size else it }
 
         if (insertionIndex == history.size) {
@@ -161,6 +219,7 @@ class SpeedEstimator(
         when (input) {
             is Input.Gnss -> processGnss(input.measurement)
             is Input.Motion -> processMotion(input.measurement)
+            is Input.Orientation -> processOrientation(input)
         }
     }
 
@@ -183,13 +242,10 @@ class SpeedEstimator(
 
         if (!state.initialized) {
             initialize(speed, variance, measurement.timestampNanos)
+            state.maximumTrustProbation = false
+            recordGnssCorrection(speed, sigma, measurement.satelliteCount, measurement.timestampNanos)
             updateCourse(measurement, speed)
             updateStationaryState(measurement, sigma, speed)
-            return
-        }
-        if (state.stationary && speed > config.stationarySpeedMetersPerSecond) {
-            reinitializeMovingSpeed(speed, variance, measurement.timestampNanos)
-            updateCourse(measurement, speed)
             return
         }
 
@@ -197,38 +253,54 @@ class SpeedEstimator(
         val innovationVariance = state.p00 + variance
         val normalizedInnovation = innovation * innovation / innovationVariance
         if (normalizedInnovation > config.innovationGate) {
-            if (!considerReacquisition(speed, sigma, measurement.timestampNanos)) return
+            val requiredFixes = if (state.stationary) {
+                config.stationaryReacquisitionRequiredFixes
+            } else {
+                config.movingReacquisitionRequiredFixes
+            }
+            if (!considerReacquisition(speed, sigma, measurement.timestampNanos, requiredFixes)) return
         } else {
             state.outlierCount = 0
-            kalmanSpeedUpdate(speed, variance)
+            if (state.stationary && speed > config.stationarySpeedMetersPerSecond) {
+                initialize(speed, variance, measurement.timestampNanos)
+            } else {
+                kalmanSpeedUpdate(speed, variance)
+            }
+            state.maximumTrustProbation = false
         }
 
-        state.lastAcceptedGnssNanos = measurement.timestampNanos
+        recordGnssCorrection(speed, sigma, measurement.satelliteCount, measurement.timestampNanos)
         updateCourse(measurement, speed)
         updateStationaryState(measurement, sigma, speed)
-        state.inertialAnchorSpeed = if (state.stationary) 0.0 else max(0.0, state.speed)
+    }
+
+    private fun processOrientation(orientation: Input.Orientation) {
+        if (!orientation.reliable) return
+        val previousYaw = state.lastReliableYawRadians
+        val previousPitch = state.lastReliablePitchRadians
+        val previousRoll = state.lastReliableRollRadians
+        if (state.lastReliableOrientationNanos > 0L) {
+            val dt = orientation.timestampNanos - state.lastReliableOrientationNanos
+            val abruptRotation =
+            dt in 1..250_000_000L && listOfNotNull(
+                previousYaw?.let { abs(angleDelta(orientation.yawRadians, it)) },
+                previousPitch?.let { abs(angleDelta(orientation.pitchRadians, it)) },
+                previousRoll?.let { abs(angleDelta(orientation.rollRadians, it)) }
+            ).maxOrNull()?.let { it > Math.toRadians(20.0) } == true
+            if (abruptRotation) state.recentAbruptOrientationNanos = orientation.timestampNanos
+        }
+        state.lastReliableYawRadians = orientation.yawRadians
+        state.lastReliablePitchRadians = orientation.pitchRadians
+        state.lastReliableRollRadians = orientation.rollRadians
+        state.lastReliableOrientationNanos = orientation.timestampNanos
     }
 
     private fun processMotion(measurement: MotionMeasurement) {
-        val previousMotionNanos = state.lastMotionNanos
-        val previousYaw = state.lastYawRadians
-        val previousPitch = state.lastPitchRadians
-        val previousRoll = state.lastRollRadians
+        val accelerationMagnitude = measurement.accelerationMagnitude()
+        val abruptOrientationAge = measurement.timestampNanos - state.recentAbruptOrientationNanos
+        val disturbedMount = abruptOrientationAge in 0..config.maximumOrientationAgeNanos &&
+            accelerationMagnitude > 2.0
 
-        if (measurement.orientationReliable && previousMotionNanos > 0L) {
-            val dt = measurement.timestampNanos - previousMotionNanos
-            val abruptRotation = dt in 1..250_000_000L && listOfNotNull(
-                previousYaw?.let { abs(angleDelta(measurement.deviceYawRadians, it)) },
-                previousPitch?.let { abs(angleDelta(measurement.devicePitchRadians, it)) },
-                previousRoll?.let { abs(angleDelta(measurement.deviceRollRadians, it)) }
-            ).maxOrNull()?.let { it > Math.toRadians(20.0) } == true
-            if (abruptRotation && measurement.accelerationMagnitude() > 2.0) clearCourse()
-        }
-
-        state.lastYawRadians = measurement.deviceYawRadians
-        state.lastPitchRadians = measurement.devicePitchRadians
-        state.lastRollRadians = measurement.deviceRollRadians
-        state.lastMotionNanos = measurement.timestampNanos
         if (measurement.orientationReliable) {
             state.lastObservedHorizontalAcceleration = sqrt(
                 measurement.accelerationEastMetersPerSecondSquared *
@@ -239,25 +311,36 @@ class SpeedEstimator(
             state.lastObservedHorizontalAccelerationNanos = measurement.timestampNanos
         }
 
-        val observedAcceleration = longitudinalAcceleration(measurement)
-        if (observedAcceleration != null) {
-            state.lastObservedLongitudinalAcceleration = observedAcceleration
+        if (accelerationMagnitude > config.maximumAccelerationMetersPerSecondSquared ||
+            disturbedMount
+        ) {
+            quarantineImu(measurement.timestampNanos)
+            predict(measurement.timestampNanos, null)
+            updateStationaryFromMotion(measurement.timestampNanos, null, null)
+            return
+        }
+
+        val projection = accelerationProjection(measurement)
+        if (projection != null) {
+            state.lastObservedLongitudinalAcceleration = projection.longitudinal
             state.lastObservedAccelerationNanos = measurement.timestampNanos
         }
-        val filteredAcceleration = observedAcceleration?.let { acceleration ->
-            state.filteredLongitudinalAcceleration?.let { previous ->
-                previous + config.inertialAccelerationSmoothingFactor * (acceleration - previous)
-            } ?: acceleration
-        }
-        state.filteredLongitudinalAcceleration = filteredAcceleration
-        predict(measurement.timestampNanos, filteredAcceleration)
-        updateStationaryFromMotion(measurement.timestampNanos, observedAcceleration)
+        val accelerationInput = projection?.let { robustAcceleration(it, measurement.timestampNanos) }
+        predict(measurement.timestampNanos, accelerationInput)
+        val unsignedLaunchAcceleration = if (projection == null && measurement.orientationReliable) {
+            state.lastObservedHorizontalAcceleration
+        } else null
+        updateStationaryFromMotion(
+            measurement.timestampNanos,
+            projection?.longitudinal,
+            unsignedLaunchAcceleration
+        )
     }
 
-    private fun predict(timestampNanos: Long, acceleration: Double?) {
+    private fun predict(timestampNanos: Long, acceleration: AccelerationInput?) {
         if (state.lastTimestampNanos == 0L) {
             state.lastTimestampNanos = timestampNanos
-            state.lastLongitudinalAcceleration = acceleration
+            state.lastLongitudinalAcceleration = acceleration?.value
             return
         }
         if (timestampNanos <= state.lastTimestampNanos) return
@@ -265,32 +348,40 @@ class SpeedEstimator(
         val elapsedNanos = timestampNanos - state.lastTimestampNanos
         val dt = elapsedNanos / NANOS_PER_SECOND
         val canUseAcceleration = mode == TrackingMode.FIXED && state.initialized && acceleration != null &&
-            elapsedNanos <= config.maximumInertialStepNanos
+            elapsedNanos <= config.maximumInertialStepNanos &&
+            timestampNanos >= state.imuQuarantinedUntilNanos
+        var integratedAcceleration: Double? = null
 
         if (canUseAcceleration) {
             val currentAcceleration = requireNotNull(acceleration)
-            val previousAcceleration = state.lastLongitudinalAcceleration ?: currentAcceleration
-            val meanAcceleration = (previousAcceleration + currentAcceleration) / 2.0
-            state.speed += (meanAcceleration - state.bias) * dt
-            boundInertialSpeed()
+            val previousAcceleration = state.lastLongitudinalAcceleration ?: currentAcceleration.value
+            val meanAcceleration = (previousAcceleration + currentAcceleration.value) / 2.0
+            val candidateSpeed = state.speed + (meanAcceleration - state.bias) * dt
+            if (isInsideInertialEnvelope(candidateSpeed, timestampNanos)) {
+                state.speed = candidateSpeed
+                integratedAcceleration = currentAcceleration.value
 
-            val oldP00 = state.p00
-            val oldP01 = state.p01
-            val oldP10 = state.p10
-            val oldP11 = state.p11
-            val biasNoise = config.biasRandomWalkNoise
-            state.p00 = oldP00 - dt * oldP10 - dt * oldP01 + dt * dt * oldP11 +
-                config.velocityProcessNoise * dt + biasNoise * dt * dt * dt / 3.0
-            state.p01 = oldP01 - dt * oldP11 - biasNoise * dt * dt / 2.0
-            state.p10 = oldP10 - dt * oldP11 - biasNoise * dt * dt / 2.0
-            state.p11 = oldP11 + biasNoise * dt
+                val oldP00 = state.p00
+                val oldP01 = state.p01
+                val oldP10 = state.p10
+                val oldP11 = state.p11
+                val biasNoise = config.biasRandomWalkNoise
+                state.p00 = oldP00 - dt * oldP10 - dt * oldP01 + dt * dt * oldP11 +
+                    config.velocityProcessNoise * dt +
+                    biasNoise * dt * dt * dt / 3.0
+                state.p01 = oldP01 - dt * oldP11 - biasNoise * dt * dt / 2.0
+                state.p10 = oldP10 - dt * oldP11 - biasNoise * dt * dt / 2.0
+                state.p11 = oldP11 + biasNoise * dt
+                addSystematicAccelerationVariance(currentAcceleration.uncertainty, dt)
+            } else {
+                growFallbackCovariance(dt)
+            }
         } else if (state.initialized) {
-            state.p00 += config.fallbackVelocityProcessNoise * dt
-            state.p11 += config.biasRandomWalkNoise * dt
+            growFallbackCovariance(dt)
         }
 
         state.lastTimestampNanos = timestampNanos
-        state.lastLongitudinalAcceleration = acceleration
+        state.lastLongitudinalAcceleration = integratedAcceleration
     }
 
     private fun kalmanSpeedUpdate(measuredSpeed: Double, variance: Double) {
@@ -322,7 +413,12 @@ class SpeedEstimator(
         state.p11 = max(newP11, 1e-9)
     }
 
-    private fun considerReacquisition(speed: Double, sigma: Double, timestampNanos: Long): Boolean {
+    private fun considerReacquisition(
+        speed: Double,
+        sigma: Double,
+        timestampNanos: Long,
+        requiredFixes: Int
+    ): Boolean {
         if (sigma > 1.0) {
             state.outlierCount = 0
             return false
@@ -340,9 +436,10 @@ class SpeedEstimator(
             (state.outlierMeanSpeed * state.outlierCount + speed) / (state.outlierCount + 1)
         state.outlierCount++
         state.outlierLastNanos = timestampNanos
-        if (state.outlierCount < 3) return false
+        if (state.outlierCount < requiredFixes) return false
 
         initialize(state.outlierMeanSpeed, measurementVariance(sigma), timestampNanos)
+        state.maximumTrustProbation = true
         state.outlierCount = 0
         return true
     }
@@ -358,26 +455,16 @@ class SpeedEstimator(
         state.lastTimestampNanos = timestampNanos
         state.lastAcceptedGnssNanos = timestampNanos
         state.stationary = false
-        state.inertialAnchorSpeed = max(0.0, speed)
-    }
-
-    private fun reinitializeMovingSpeed(speed: Double, variance: Double, timestampNanos: Long) {
-        state.speed = speed
-        state.p00 = variance
-        state.p01 = 0.0
-        state.p10 = 0.0
-        state.lastTimestampNanos = timestampNanos
-        state.lastAcceptedGnssNanos = timestampNanos
-        state.stationary = false
-        state.inertialAnchorSpeed = max(0.0, speed)
         state.stationaryCandidateNanos = 0L
         state.stationaryFixCount = 0
         state.stationaryExitCandidateNanos = 0L
-        state.outlierCount = 0
     }
 
     private fun updateCourse(measurement: GnssMeasurement, speed: Double) {
-        if (mode != TrackingMode.FIXED || state.lastYawRadians == null) return
+        if (mode != TrackingMode.FIXED) return
+        val reliableYaw = state.lastReliableYawRadians ?: return clearCourse()
+        val orientationAge = measurement.timestampNanos - state.lastReliableOrientationNanos
+        if (orientationAge !in 0..config.maximumOrientationAgeNanos) return clearCourse()
         val bearing = measurement.bearingDegrees ?: return clearCourse()
         val horizontalAccuracy = measurement.horizontalAccuracyMeters ?: return clearCourse()
         val declination = measurement.magneticDeclinationDegrees ?: return clearCourse()
@@ -404,20 +491,38 @@ class SpeedEstimator(
             return clearCourse(resetLegacyBearing = !preserveLegacyEvidence)
         }
 
-        state.courseRadians = normalizeRadians(Math.toRadians(bearing - declination))
-        state.courseAnchorYawRadians = state.lastYawRadians
+        val newCourse = normalizeRadians(Math.toRadians(bearing - declination))
+        val priorCourse = state.courseRadians
+        val priorYaw = state.courseAnchorYawRadians
+        if (priorCourse != null && priorYaw != null) {
+            val expectedCourse = priorCourse + angleDelta(reliableYaw, priorYaw)
+            val maximumDifference = Math.toRadians(
+                max(
+                    config.maximumCourseInconsistencyDegrees,
+                    3.0 * (bearingAccuracy ?: config.maximumLegacyBearingDeltaDegrees)
+                )
+            )
+            if (abs(angleDelta(newCourse, expectedCourse)) > maximumDifference) {
+                clearCourse()
+                return
+            }
+        }
+        state.courseRadians = newCourse
+        state.courseAnchorYawRadians = reliableYaw
         state.courseAnchorNanos = measurement.timestampNanos
     }
 
-    private fun longitudinalAcceleration(measurement: MotionMeasurement): Double? {
+    private fun accelerationProjection(measurement: MotionMeasurement): AccelerationProjection? {
         if (mode != TrackingMode.FIXED || !measurement.orientationReliable) return null
         if (measurement.timestampNanos - state.courseAnchorNanos > config.maximumCourseAgeNanos) return null
         val anchorCourse = state.courseRadians ?: return null
         val anchorYaw = state.courseAnchorYawRadians ?: return null
         val course = anchorCourse + angleDelta(measurement.deviceYawRadians, anchorYaw)
-        val acceleration = measurement.accelerationEastMetersPerSecondSquared * sin(course) +
+        val longitudinal = measurement.accelerationEastMetersPerSecondSquared * sin(course) +
             measurement.accelerationMagneticNorthMetersPerSecondSquared * cos(course)
-        return acceleration.takeIf { abs(it) <= config.maximumAccelerationMetersPerSecondSquared }
+        val lateral = measurement.accelerationEastMetersPerSecondSquared * cos(course) -
+            measurement.accelerationMagneticNorthMetersPerSecondSquared * sin(course)
+        return AccelerationProjection(longitudinal, lateral, measurement.accelerationUpMetersPerSecondSquared)
     }
 
     private fun updateStationaryState(measurement: GnssMeasurement, sigma: Double, speed: Double) {
@@ -452,12 +557,23 @@ class SpeedEstimator(
         }
     }
 
-    private fun updateStationaryFromMotion(timestampNanos: Long, acceleration: Double?) {
-        if (!state.stationary || acceleration == null) {
+    private fun updateStationaryFromMotion(
+        timestampNanos: Long,
+        signedLongitudinalAcceleration: Double?,
+        unsignedExitAcceleration: Double?
+    ) {
+        if (!state.stationary) {
             state.stationaryExitCandidateNanos = 0L
             return
         }
-        if (abs(acceleration - state.bias) > config.stationaryExitAccelerationMetersPerSecondSquared) {
+        val exitAcceleration = unsignedExitAcceleration ?: signedLongitudinalAcceleration?.let {
+            abs(it - state.bias)
+        }
+        if (exitAcceleration == null) {
+            state.stationaryExitCandidateNanos = 0L
+            return
+        }
+        if (exitAcceleration > config.stationaryExitAccelerationMetersPerSecondSquared) {
             if (state.stationaryExitCandidateNanos == 0L) state.stationaryExitCandidateNanos = timestampNanos
             if (timestampNanos - state.stationaryExitCandidateNanos >= config.stationaryExitDwellNanos) {
                 state.stationary = false
@@ -466,7 +582,9 @@ class SpeedEstimator(
             }
         } else {
             state.stationaryExitCandidateNanos = 0L
-            state.bias += 0.02 * (acceleration - state.bias)
+            signedLongitudinalAcceleration?.let { acceleration ->
+                state.bias += 0.02 * (acceleration - state.bias)
+            }
         }
     }
 
@@ -474,8 +592,7 @@ class SpeedEstimator(
         state.courseRadians = null
         state.courseAnchorYawRadians = null
         state.courseAnchorNanos = 0L
-        state.lastLongitudinalAcceleration = null
-        state.filteredLongitudinalAcceleration = null
+        resetAccelerationFilter()
         state.lastObservedLongitudinalAcceleration = null
         state.lastObservedAccelerationNanos = 0L
         if (resetLegacyBearing) {
@@ -505,29 +622,133 @@ class SpeedEstimator(
         if (unusable) clearCourse()
     }
 
-    private fun boundInertialSpeed() {
-        val anchor = state.inertialAnchorSpeed ?: return
-        val fraction = config.maximumInertialSpeedChangeFraction
-        val lowerBound = anchor * (1.0 - fraction)
-        val upperBound = anchor + max(
-            config.minimumUpwardInertialSpeedChangeMetersPerSecond,
-            anchor * fraction
-        )
-        val unboundedSpeed = state.speed
-        state.speed = unboundedSpeed.coerceIn(lowerBound, upperBound)
-        if (state.speed != unboundedSpeed) {
-            val constrainedCorrection = max(
-                config.minimumUpwardInertialSpeedChangeMetersPerSecond,
-                anchor * fraction
-            )
-            state.p00 = max(state.p00, constrainedCorrection * constrainedCorrection)
+    private fun robustAcceleration(
+        projection: AccelerationProjection,
+        timestampNanos: Long
+    ): AccelerationInput? {
+        if (abs(projection.longitudinal) > config.maximumLongitudinalAccelerationMetersPerSecondSquared ||
+            abs(projection.vertical) > config.maximumVerticalAccelerationMetersPerSecondSquared
+        ) {
+            resetAccelerationFilter()
+            return null
         }
+
+        state.accelerationSample0 = state.accelerationSample1
+        state.accelerationSample1 = state.accelerationSample2
+        state.accelerationSample2 = projection.longitudinal
+        state.accelerationSampleCount = min(3, state.accelerationSampleCount + 1)
+        if (state.accelerationSampleCount < 3) return null
+
+        val median = medianOfThree(
+            state.accelerationSample0,
+            state.accelerationSample1,
+            state.accelerationSample2
+        )
+        val elapsedNanos = timestampNanos - state.filteredAccelerationNanos
+        val dt = max(0L, elapsedNanos) / NANOS_PER_SECOND
+        val residual = projection.longitudinal - median
+        val residualAlpha = 1.0 - exp(-dt / config.accelerationResidualTimeConstantSeconds)
+        state.accelerationResidualVariance += residualAlpha.coerceIn(0.0, 1.0) *
+            (residual * residual - state.accelerationResidualVariance)
+
+        val filtered = state.filteredLongitudinalAcceleration?.let { previous ->
+            val alpha = 1.0 - exp(-dt / config.inertialSmoothingTimeConstantSeconds)
+            previous + alpha.coerceIn(0.0, 1.0) * (median - previous)
+        } ?: median
+        state.filteredLongitudinalAcceleration = filtered
+        state.filteredAccelerationNanos = timestampNanos
+
+        val orientationError = config.assumedOrientationErrorRadians
+        val lateralLeakage = projection.lateral * sin(orientationError)
+        val verticalLeakage = projection.vertical * sin(orientationError)
+        val baseUncertainty = config.baseAccelerationUncertaintyMetersPerSecondSquared
+        val uncertainty = sqrt(
+            baseUncertainty * baseUncertainty +
+                lateralLeakage * lateralLeakage +
+                verticalLeakage * verticalLeakage +
+                max(0.0, state.accelerationResidualVariance)
+        )
+        return AccelerationInput(filtered, uncertainty).takeIf {
+            uncertainty <= config.maximumAccelerationUncertaintyMetersPerSecondSquared
+        }
+    }
+
+    private fun quarantineImu(timestampNanos: Long) {
+        state.imuQuarantinedUntilNanos = max(
+            state.imuQuarantinedUntilNanos,
+            timestampNanos + config.imuQuarantineNanos
+        )
+        clearCourse()
+    }
+
+    private fun resetAccelerationFilter() {
+        state.lastLongitudinalAcceleration = null
+        state.filteredLongitudinalAcceleration = null
+        state.filteredAccelerationNanos = 0L
+        state.accelerationSample0 = 0.0
+        state.accelerationSample1 = 0.0
+        state.accelerationSample2 = 0.0
+        state.accelerationSampleCount = 0
+        state.accelerationResidualVariance = 0.0
+    }
+
+    private fun isInsideInertialEnvelope(candidateSpeed: Double, timestampNanos: Long): Boolean {
+        val anchorSpeed = state.lastGnssSpeed ?: return false
+        val anchorSigma = state.lastGnssSigma ?: return false
+        val elapsedNanos = timestampNanos - state.lastGnssCorrectionNanos
+        if (elapsedNanos < 0L) return false
+        val ageSeconds = elapsedNanos / NANOS_PER_SECOND
+        val sigmaMargin = config.inertialEnvelopeSigmaMultiplier * config.speedAccuracyInflation *
+            max(anchorSigma, config.minimumSpeedAccuracyMetersPerSecond)
+        val lowerBound = max(
+            0.0,
+            anchorSpeed - config.maximumBrakingAccelerationMetersPerSecondSquared * ageSeconds - sigmaMargin
+        )
+        val upperBound = anchorSpeed +
+            config.maximumDriveAccelerationMetersPerSecondSquared * ageSeconds + sigmaMargin
+        return candidateSpeed in lowerBound..upperBound
+    }
+
+    private fun growFallbackCovariance(dt: Double) {
+        state.p00 += config.fallbackVelocityProcessNoise * dt
+        state.p11 += config.biasRandomWalkNoise * dt
+    }
+
+    private fun recordGnssCorrection(speed: Double, sigma: Double, satelliteCount: Int, timestampNanos: Long) {
+        state.lastAcceptedGnssNanos = timestampNanos
+        state.lastGnssCorrectionNanos = timestampNanos
+        state.lastGnssSpeed = speed
+        state.lastGnssSigma = sigma
+        state.lastGnssSatelliteCount = satelliteCount
+        state.inertialSystematicVariance = 0.0
+        state.inertialSystematicUncertaintyExposure = 0.0
+    }
+
+    private fun addSystematicAccelerationVariance(uncertainty: Double, dt: Double) {
+        state.inertialSystematicUncertaintyExposure += uncertainty * dt
+        val targetVariance = state.inertialSystematicUncertaintyExposure *
+            state.inertialSystematicUncertaintyExposure
+        val additionalVariance = max(0.0, targetVariance - state.inertialSystematicVariance)
+        state.p00 += additionalVariance
+        state.inertialSystematicVariance += additionalVariance
+    }
+
+    private fun medianOfThree(first: Double, second: Double, third: Double): Double {
+        return first + second + third - min(first, min(second, third)) - max(first, max(second, third))
+    }
+
+    private fun inputPriority(input: Input): Int = when (input) {
+        is Input.Orientation -> 0
+        is Input.Motion -> 1
+        is Input.Gnss -> 2
     }
 
     private fun pruneHistory(newestTimestampNanos: Long) {
         val cutoff = newestTimestampNanos - config.replayHistoryNanos
         while (history.isNotEmpty() && history.first().input.timestampNanos < cutoff) {
-            historyBase = history.removeAt(0).stateAfter.copy()
+            val removed = history.removeAt(0)
+            historyBase = removed.stateAfter.copy()
+            historyBaseInputNanos = removed.input.timestampNanos
         }
     }
 
@@ -544,14 +765,14 @@ class SpeedEstimator(
         return inflatedSigma * inflatedSigma
     }
 
-    private fun isFiniteMotion(measurement: MotionMeasurement): Boolean =
+    private fun hasFiniteMotionValues(measurement: MotionMeasurement): Boolean =
         measurement.timestampNanos > 0L &&
             measurement.accelerationEastMetersPerSecondSquared.isFinite() &&
             measurement.accelerationMagneticNorthMetersPerSecondSquared.isFinite() &&
             measurement.accelerationUpMetersPerSecondSquared.isFinite() &&
             measurement.deviceYawRadians.isFinite() && measurement.devicePitchRadians.isFinite() &&
-            measurement.deviceRollRadians.isFinite() &&
-            measurement.accelerationMagnitude() <= config.maximumAccelerationMetersPerSecondSquared
+            measurement.deviceRollRadians.isFinite() && measurement.orientationTimestampNanos > 0L &&
+            measurement.orientationTimestampNanos <= measurement.timestampNanos
 
     private fun MotionMeasurement.accelerationMagnitude(): Double = sqrt(
         accelerationEastMetersPerSecondSquared * accelerationEastMetersPerSecondSquared +
