@@ -16,7 +16,7 @@ The app remains a single-screen HUD with no navigation graph.
 
 ### Top Left
 
-- Satellites used in the current GNSS fix
+- Latest satellites reported as used-in-fix by Android's GNSS status callback
 - Green at three or more satellites, red below three
 - Satellite count is status information, not a speed-accuracy measurement
 
@@ -89,9 +89,9 @@ TYPE_ROTATION_VECTOR ──────────┘             │
                               SpeedometerViewModel -> Compose
 ```
 
-`SpeedRepositoryImpl` serializes location and sensor callbacks on one `HandlerThread`. It emits UI estimates at no more than 10 Hz on the main thread. Starting and stopping are idempotent, and all listeners are removed in `onStop`.
+`SpeedRepositoryImpl` serializes location and sensor callbacks on one `HandlerThread`. A 10 Hz tick keeps stale-data state current, while accepted location callbacks may emit immediately. Starting and stopping are idempotent. Listeners remain active across configuration recreation and are removed when `onStop` represents real backgrounding.
 
-GNSS satellite callbacks only update satellite state. They never replay a cached `Location` and never refresh fix age.
+GNSS satellite callbacks update the displayed count and timestamped satellite evidence for subsequent fixes. They never replay a cached `Location` and never refresh fix age.
 
 ## Measurement Semantics
 
@@ -102,7 +102,7 @@ GNSS satellite callbacks only update satellite state. They never replay a cached
 - Optional bearing and bearing uncertainty
 - Horizontal positional accuracy, kept separate from speed uncertainty
 - Local magnetic declination
-- Satellites used in fix
+- Temporally bounded used-in-fix evidence from the latest preceding GNSS status callback
 - `Location.elapsedRealtimeNanos` measurement time
 
 `MotionMeasurement` preserves transformed East/North/Up linear acceleration, device yaw/pitch/roll, orientation reliability, the acceleration timestamp, and the exact rotation-vector timestamp used for that transform.
@@ -124,7 +124,7 @@ Missing speed accuracy receives a conservative `2.0 m/s` uncertainty. Measuremen
 
 An innovation gate rejects isolated statistically implausible speed jumps. Two consecutive high-quality, mutually consistent fixes trigger controlled reacquisition so the filter cannot lock out after a genuine speed change or GNSS outage. Reacquired speed remains in maximum-speed probation until another in-gate GNSS fix confirms it.
 
-Displayed speed may be a fused estimate, but session maximum consumes a separate raw, accepted GNSS candidate. Inertial prediction can never inflate the recorded maximum.
+Displayed speed may be a fused estimate, but session maximum consumes separate raw, accepted GNSS candidates. Replay emits bounded candidate upserts, retractions, and finalizations so delayed fixes cannot leave a maximum that the final chronological history rejects. Inertial prediction can never inflate the recorded maximum. The five-second maximum warmup begins at the first accepted GNSS correction.
 
 ### Fixed-Mode Prediction
 
@@ -142,7 +142,7 @@ The acceleration channel uses a median-of-three prefilter and an exponential smo
 
 ### Delayed Measurements
 
-The estimator retains five seconds of timestamped inputs and state checkpoints. A GNSS measurement delayed by up to three seconds is inserted at its measurement epoch, then all later events are replayed. Applying an old fix at callback time is prohibited.
+The estimator retains five seconds of timestamped inputs and state checkpoints. A GNSS measurement delayed by up to three seconds is inserted at its measurement epoch, then all later events are replayed. Applying an old fix at callback time is prohibited. GNSS, motion, and orientation identities are deduplicated by stream and elapsed-realtime timestamp. History uses indexed duplicate checks, binary insertion, logical-prefix pruning, and amortized compaction.
 
 ### Low Speed and Stationarity
 
@@ -167,7 +167,7 @@ No watchdog injects fake zero readings.
 ## Session Behavior
 
 - Acquisition starts in `onStart` after precise-location permission is available
-- Acquisition and all sensor listeners stop in `onStop`
+- Acquisition and sensor listeners survive configuration recreation but stop when the app backgrounds
 - Session statistics reset when the app backgrounds
 - Display unit and tracking mode persist locally
 - No location, motion, or session history leaves the device
@@ -191,18 +191,21 @@ No watchdog injects fake zero readings.
 ```text
 app/src/main/java/com/mightykatun/speedometer/app/
 ├── MainActivity.kt
+├── SpeedRepositoryViewModel.kt
 ├── SpeedometerViewModel.kt
 ├── data/repository/
+│   ├── RepositoryPlatform.kt
 │   ├── SpeedRepository.kt
 │   └── SpeedRepositoryImpl.kt
 ├── di/SpeedometerViewModelFactory.kt
 └── domain/
     ├── SpeedEstimator.kt
     ├── SessionStatisticsTracker.kt
-    ├── TimeProvider.kt
+    ├── MonotonicClock.kt
     ├── model/
     │   ├── EstimateQuality.kt
     │   ├── GnssMeasurement.kt
+    │   ├── MaximumCandidate.kt
     │   ├── MotionMeasurement.kt
     │   ├── SessionConfig.kt
     │   ├── SpeedEstimate.kt
@@ -210,7 +213,7 @@ app/src/main/java/com/mightykatun/speedometer/app/
     │   ├── SpeedometerState.kt
     │   ├── SpeedUnit.kt
     │   └── TrackingMode.kt
-    ├── time/ProductionTimeProvider.kt
+    ├── time/AndroidElapsedRealtimeClock.kt
     └── util/SpeedConverter.kt
 ```
 
@@ -221,10 +224,10 @@ No third-party location or sensor-fusion package is used. Android's composite se
 Automated gates:
 
 ```bash
-./gradlew clean test lint assembleDebug
+./gradlew --no-build-cache clean test lint assembleDebug assembleRelease assembleDebugAndroidTest
 ```
 
-Estimator tests cover low-speed preservation, invalid measurements, uncertainty gating, outliers, reacquisition probation, raw-GNSS maximum candidates, GNSS isolation, robust GNSS + IMU prediction, spike/vertical-shock rejection, violent-motion quarantine, orientation freshness, sensor-rate invariance, course expiry, delayed replay, duplicate fixes, stationary evidence, mode reset, and stale-data unavailability.
+JVM tests cover repository lifecycle/retry/generation ordering, low-speed preservation, invalid measurements, uncertainty gating, outliers, reacquisition probation, replay-aware maximum candidates, GNSS isolation, GNSS + IMU prediction, spike/vertical-shock rejection, violent-motion quarantine, orientation freshness, sensor-rate invariance, course expiry, delayed replay, duplicate inputs, history compaction, stationary evidence, mode reset, and stale-data unavailability. Compose instrumentation tests cover the three app controls and permission recovery UI.
 
 ## Field Validation
 

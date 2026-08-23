@@ -1,92 +1,173 @@
 package com.mightykatun.speedometer.app.domain
 
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
+import com.mightykatun.speedometer.app.domain.model.GnssMeasurement
+import com.mightykatun.speedometer.app.domain.model.MaximumCandidate
+import com.mightykatun.speedometer.app.domain.model.MaximumCandidateChange
 import com.mightykatun.speedometer.app.domain.model.SessionConfig
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
-import org.mockito.kotlin.mock
-import org.mockito.kotlin.whenever
 
 class SessionStatisticsTrackerTest {
-    private val timeProvider = mock<TimeProvider>()
-    private val tracker = SessionStatisticsTracker(SessionConfig(), timeProvider)
+    private val clock = TestClock()
+    private val tracker = SessionStatisticsTracker(SessionConfig(), clock)
 
     @Test
-    fun `current speed is shown during warmup without updating maximum`() {
-        whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 1000L)
+    fun `current speed is shown during first fix warmup without updating maximum`() {
         tracker.startSession()
-        tracker.updateSatelliteCount(5)
 
-        val stats = tracker.updateSpeed(estimate(10.0, trusted = true, candidateTimestamp = 1_000_000_000L))
+        val stats = tracker.updateSpeed(update(10.0, seconds(10), upsert(1, 10.0, seconds(10))))
 
         assertEquals(36f, stats.currentSpeedKmh!!, 0.01f)
         assertEquals(0f, stats.maxSpeedKmh, 0.01f)
     }
 
     @Test
-    fun `trusted speed updates maximum after warmup with enough satellites`() {
-        whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 6000L)
+    fun `warmup starts at first accepted fix rather than activity start`() {
         tracker.startSession()
-        tracker.updateSatelliteCount(3)
+        tracker.updateSpeed(update(10.0, seconds(10)))
 
-        val stats = tracker.updateSpeed(estimate(20.0, trusted = true))
+        val before = tracker.updateSpeed(update(20.0, seconds(10), upsert(1, 20.0, seconds(14) + 900_000_000L)))
+        val atBoundary = tracker.updateSpeed(update(20.0, seconds(10), upsert(2, 20.0, seconds(15))))
+
+        assertEquals(0f, before.maxSpeedKmh, 0.01f)
+        assertEquals(72f, atBoundary.maxSpeedKmh, 0.01f)
+    }
+
+    @Test
+    fun `retraction removes a provisional maximum`() {
+        tracker.startSession()
+        tracker.updateSpeed(update(20.0, seconds(1), upsert(1, 20.0, seconds(6))))
+
+        val stats = tracker.updateSpeed(update(20.0, seconds(1), MaximumCandidateChange.Retract(1)))
+
+        assertEquals(0f, stats.maxSpeedKmh, 0.01f)
+    }
+
+    @Test
+    fun `replacement can lower a candidate without lowering an unrelated higher maximum`() {
+        tracker.startSession()
+        tracker.updateSpeed(
+            update(
+                30.0,
+                seconds(1),
+                upsert(1, 20.0, seconds(6)),
+                upsert(2, 30.0, seconds(7))
+            )
+        )
+
+        val stats = tracker.updateSpeed(update(20.0, seconds(1), upsert(1, 10.0, seconds(6))))
+
+        assertEquals(108f, stats.maxSpeedKmh, 0.01f)
+    }
+
+    @Test
+    fun `duplicate upsert is idempotent`() {
+        tracker.startSession()
+        val candidate = upsert(1, 20.0, seconds(6))
+        tracker.updateSpeed(update(20.0, seconds(1), candidate))
+
+        val stats = tracker.updateSpeed(update(20.0, seconds(1), candidate))
 
         assertEquals(72f, stats.maxSpeedKmh, 0.01f)
     }
 
     @Test
-    fun `maximum uses the raw GNSS candidate instead of fused display speed`() {
-        whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 6000L)
+    fun `finalization preserves maximum after active candidate removal`() {
         tracker.startSession()
-        tracker.updateSatelliteCount(5)
+        val candidate = candidate(1, 20.0, seconds(6))
+        tracker.updateSpeed(update(20.0, seconds(1), MaximumCandidateChange.Upsert(candidate)))
 
-        val stats = tracker.updateSpeed(estimate(20.0, trusted = true, maximumCandidate = 18.0))
+        val finalized = tracker.updateSpeed(
+            update(20.0, seconds(1), MaximumCandidateChange.Finalize(candidate.id, candidate))
+        )
+        val afterRetraction = tracker.updateSpeed(
+            update(10.0, seconds(1), MaximumCandidateChange.Retract(candidate.id))
+        )
 
-        assertEquals(72f, stats.currentSpeedKmh!!, 0.01f)
-        assertEquals(64.8f, stats.maxSpeedKmh, 0.01f)
+        assertEquals(72f, finalized.maxSpeedKmh, 0.01f)
+        assertEquals(72f, afterRetraction.maxSpeedKmh, 0.01f)
     }
 
     @Test
-    fun `degraded estimate cannot update maximum`() {
-        whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 6000L)
+    fun `finalizing an invalid replay result removes its former value`() {
         tracker.startSession()
-        tracker.updateSatelliteCount(5)
+        tracker.updateSpeed(update(20.0, seconds(1), upsert(1, 20.0, seconds(6))))
 
-        val stats = tracker.updateSpeed(estimate(20.0, trusted = false))
-
-        assertEquals(72f, stats.currentSpeedKmh!!, 0.01f)
-        assertEquals(0f, stats.maxSpeedKmh, 0.01f)
-    }
-
-    @Test
-    fun `maximum candidate rejected before warmup is not admitted by a later tick`() {
-        whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 4900L, 5100L)
-        tracker.startSession()
-        tracker.updateSatelliteCount(5)
-        val candidate = estimate(20.0, trusted = true, candidateTimestamp = 4_900_000_000L)
-
-        tracker.updateSpeed(candidate)
-        val stats = tracker.updateSpeed(candidate)
+        val stats = tracker.updateSpeed(
+            update(20.0, seconds(1), MaximumCandidateChange.Finalize(1, null))
+        )
 
         assertEquals(0f, stats.maxSpeedKmh, 0.01f)
     }
 
     @Test
-    fun `maximum speed requires minimum satellites on the originating fix`() {
-        whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 6000L)
+    fun `candidate requires satellites from its originating fix`() {
         tracker.startSession()
-        tracker.updateSatelliteCount(5)
 
-        val stats = tracker.updateSpeed(estimate(20.0, trusted = true, candidateSatellites = 2))
+        val stats = tracker.updateSpeed(update(20.0, seconds(1), upsert(1, 20.0, seconds(6), satellites = 2)))
 
         assertEquals(0f, stats.maxSpeedKmh, 0.01f)
+    }
+
+    @Test
+    fun `delayed and chronological mutations produce the same final maximum`() {
+        fun result(changes: List<List<MaximumCandidateChange>>): Float {
+            val local = SessionStatisticsTracker(SessionConfig(), TestClock())
+            local.startSession()
+            var maximum = 0f
+            changes.forEach { batch ->
+                maximum = local.updateSpeed(update(10.0, seconds(1), *batch.toTypedArray())).maxSpeedKmh
+            }
+            return maximum
+        }
+        val high = candidate(2, 30.0, seconds(7))
+        val low = candidate(1, 20.0, seconds(6))
+
+        val chronological = result(listOf(listOf(MaximumCandidateChange.Upsert(low)), listOf(MaximumCandidateChange.Upsert(high))))
+        val delayed = result(
+            listOf(
+                listOf(MaximumCandidateChange.Upsert(high)),
+                listOf(MaximumCandidateChange.Upsert(low)),
+                listOf(MaximumCandidateChange.Retract(low.id))
+            )
+        )
+
+        assertEquals(chronological, delayed, 0f)
+    }
+
+    @Test
+    fun `estimator replay and statistics tracking produce chronological maximum`() {
+        fun result(measurements: List<GnssMeasurement>): Float {
+            val estimator = SpeedEstimator()
+            val localTracker = SessionStatisticsTracker(
+                SessionConfig(warmupPeriodMillis = 0L),
+                TestClock()
+            )
+            localTracker.startSession()
+            var maximum = 0f
+            measurements.forEach { measurement ->
+                maximum = localTracker.updateSpeed(
+                    estimator.onGnssMeasurement(measurement)
+                ).maxSpeedKmh
+            }
+            return maximum
+        }
+        val first = gnss(10.0, seconds(1))
+        val delayed = gnss(20.0, seconds(2))
+        val later = gnss(20.0, seconds(3))
+        val last = gnss(10.0, seconds(4))
+
+        val chronologicalMaximum = result(listOf(first, delayed, later, last))
+        val replayedMaximum = result(listOf(first, later, last, delayed))
+
+        assertEquals(chronologicalMaximum, replayedMaximum, 0f)
     }
 
     @Test
     fun `satellite updates are independent from speed`() {
-        whenever(timeProvider.currentTimeMillis()).thenReturn(0L)
         tracker.startSession()
 
         tracker.updateSatelliteCount(7)
@@ -97,31 +178,47 @@ class SessionStatisticsTrackerTest {
         assertEquals(7, stats.maxSatellites)
     }
 
-    @Test
-    fun `unavailable estimate remains unavailable`() {
-        whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 6000L)
-        tracker.startSession()
-
-        val stats = tracker.updateSpeed(estimate(null, trusted = false))
-
-        assertNull(stats.currentSpeedKmh)
-        assertEquals(0f, stats.maxSpeedKmh, 0.01f)
-    }
-
-    private fun estimate(
+    private fun update(
         speed: Double?,
-        trusted: Boolean,
-        maximumCandidate: Double? = speed.takeIf { trusted },
-        candidateTimestamp: Long = 6_000_000_000L,
-        candidateSatellites: Int = 3
+        warmupStart: Long,
+        vararg changes: MaximumCandidateChange
     ) = SpeedEstimate(
         speedMetersPerSecond = speed,
         uncertaintyMetersPerSecond = 0.2,
-        quality = if (trusted) EstimateQuality.TRACKING else EstimateQuality.DEGRADED,
-        trustedForMaximum = trusted,
-        timestampNanos = candidateTimestamp,
-        maximumCandidateMetersPerSecond = maximumCandidate,
-        maximumCandidateTimestampNanos = candidateTimestamp.takeIf { maximumCandidate != null } ?: 0L,
-        maximumCandidateSatelliteCount = candidateSatellites
+        quality = if (speed == null) EstimateQuality.UNAVAILABLE else EstimateQuality.TRACKING,
+        timestampNanos = warmupStart,
+        maximumWarmupStartTimestampNanos = warmupStart,
+        maximumCandidateChanges = changes.toList()
     )
+
+    private fun upsert(
+        id: Long,
+        speed: Double,
+        timestamp: Long,
+        satellites: Int = 3
+    ) = MaximumCandidateChange.Upsert(candidate(id, speed, timestamp, satellites))
+
+    private fun candidate(
+        id: Long,
+        speed: Double,
+        timestamp: Long,
+        satellites: Int = 3
+    ) = MaximumCandidate(id, speed, timestamp, satellites)
+
+    private fun gnss(speed: Double, timestamp: Long) = GnssMeasurement(
+        speedMetersPerSecond = speed,
+        speedAccuracyMetersPerSecond = 0.1,
+        bearingDegrees = null,
+        bearingAccuracyDegrees = null,
+        horizontalAccuracyMeters = 1.0,
+        magneticDeclinationDegrees = null,
+        satelliteCount = 5,
+        timestampNanos = timestamp
+    )
+
+    private fun seconds(value: Long): Long = value * 1_000_000_000L
+
+    private class TestClock : MonotonicClock {
+        override fun elapsedRealtimeMillis(): Long = 0L
+    }
 }

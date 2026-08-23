@@ -1,8 +1,6 @@
 package com.mightykatun.speedometer.app.data.repository
 
-import android.Manifest
 import android.content.Context
-import android.content.pm.PackageManager
 import android.hardware.GeomagneticField
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -14,120 +12,159 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.HandlerThread
-import android.os.Looper
-import android.os.SystemClock
-import androidx.core.content.ContextCompat
 import com.mightykatun.speedometer.app.domain.SpeedEstimator
 import com.mightykatun.speedometer.app.domain.model.GnssMeasurement
 import com.mightykatun.speedometer.app.domain.model.MotionMeasurement
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import com.mightykatun.speedometer.app.domain.model.TrackingMode
+import java.util.concurrent.atomic.AtomicLong
 
-class SpeedRepositoryImpl(
-    context: Context,
-    private val estimator: SpeedEstimator = SpeedEstimator()
+class SpeedRepositoryImpl private constructor(
+    private val estimator: SpeedEstimator,
+    dependencies: RepositoryDependencies
 ) : SpeedRepository {
-    private val applicationContext = context.applicationContext
-    private val locationManager =
-        applicationContext.getSystemService(Context.LOCATION_SERVICE) as LocationManager
-    private val sensorManager =
-        applicationContext.getSystemService(Context.SENSOR_SERVICE) as SensorManager
-    private val linearAccelerationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
-    private val rotationVectorSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val workerThread = HandlerThread("speed-sensors").apply { start() }
-    private val workerHandler = Handler(workerThread.looper)
+    constructor(
+        context: Context,
+        estimator: SpeedEstimator = SpeedEstimator()
+    ) : this(estimator, productionRepositoryDependencies(context))
 
-    override val supportsFixedMode: Boolean
-        get() = linearAccelerationSensor != null && rotationVectorSensor != null
+    internal constructor(
+        estimator: SpeedEstimator,
+        worker: RepositoryWorker,
+        mainDispatcher: RepositoryMainDispatcher,
+        locationGateway: RepositoryLocationGateway,
+        motionGateway: RepositoryMotionGateway
+    ) : this(
+        estimator,
+        RepositoryDependencies(worker, mainDispatcher, locationGateway, motionGateway)
+    )
 
-    @Volatile
-    private var started = false
+    private val worker = dependencies.worker
+    private val mainDispatcher = dependencies.mainDispatcher
+    private val locationGateway = dependencies.locationGateway
+    private val motionGateway = dependencies.motionGateway
+    private val stopEpoch = AtomicLong()
 
-    @Volatile
-    private var generation = 0
+    override val supportsFixedMode: Boolean = motionGateway.supportsFixedMode
 
-    private var trackingMode = TrackingMode.HANDHELD
+    // All fields below are mutated only by the repository worker.
+    private var lifecycle = Lifecycle.STOPPED
     private var session: Session? = null
-    private var onEstimate: ((SpeedEstimate) -> Unit)? = null
-    private var onSatelliteCount: ((Int) -> Unit)? = null
-    private var onGnssAvailable: (() -> Unit)? = null
-    private var onError: ((String) -> Unit)? = null
+    private var failedStartDelivery: Delivery? = null
 
     override fun startUpdates(
         trackingMode: TrackingMode,
         onEstimate: (SpeedEstimate) -> Unit,
         onSatelliteCount: (Int) -> Unit,
         onGnssAvailable: () -> Unit,
-        onError: (String) -> Unit
+        onPermissionRequired: () -> Unit,
+        onError: (String) -> Unit,
+        onTrackingModeChanged: (TrackingMode) -> Unit
     ) {
-        this.onEstimate = onEstimate
-        this.onSatelliteCount = onSatelliteCount
-        this.onGnssAvailable = onGnssAvailable
-        this.onError = onError
-        val newMode = effectiveMode(trackingMode)
-        if (started) {
-            setTrackingMode(newMode)
-            return
-        }
-
-        this.trackingMode = newMode
-        started = true
-        val activeGeneration = ++generation
-        workerHandler.post {
-            if (!isActive(activeGeneration)) return@post
-            estimator.reset(newMode)
-            val newSession = Session(activeGeneration)
-            session = newSession
-            newSession.start()
+        val callbacks = Callbacks(
+            onEstimate,
+            onSatelliteCount,
+            onGnssAvailable,
+            onPermissionRequired,
+            onError,
+            onTrackingModeChanged
+        )
+        val expectedEpoch = stopEpoch.get()
+        worker.post {
+            if (expectedEpoch == stopEpoch.get()) handleStart(trackingMode, callbacks, expectedEpoch)
         }
     }
 
     override fun setTrackingMode(trackingMode: TrackingMode) {
-        val newMode = effectiveMode(trackingMode)
-        if (this.trackingMode == newMode) return
-        this.trackingMode = newMode
-        workerHandler.post {
-            estimator.setTrackingMode(newMode)
-            session?.updateSensorRegistration()
-            emitEstimate(estimator.estimateAt(SystemClock.elapsedRealtimeNanos()), generation)
+        val expectedEpoch = stopEpoch.get()
+        worker.post {
+            if (expectedEpoch == stopEpoch.get() && lifecycle == Lifecycle.STARTED) {
+                session?.setTrackingMode(trackingMode)
+            }
         }
     }
 
     override fun stopUpdates() {
-        if (!started) return
-        started = false
-        generation++
-        workerHandler.post {
-            session?.stop()
-            session = null
-        }
-        onEstimate = null
-        onSatelliteCount = null
-        onGnssAvailable = null
-        onError = null
+        stopEpoch.incrementAndGet()
+        worker.post { handleStop() }
     }
 
     override fun close() {
-        stopUpdates()
-        workerHandler.post { workerThread.quitSafely() }
+        stopEpoch.incrementAndGet()
+        worker.post {
+            if (lifecycle == Lifecycle.CLOSED) return@post
+            invalidateDeliveries()
+            stopSession()
+            lifecycle = Lifecycle.CLOSED
+            worker.close()
+        }
     }
 
-    private inner class Session(private val activeGeneration: Int) {
+    private fun handleStart(requestedMode: TrackingMode, callbacks: Callbacks, expectedEpoch: Long) {
+        if (lifecycle == Lifecycle.CLOSED) return
+        failedStartDelivery?.invalidate()
+        failedStartDelivery = null
+
+        if (lifecycle == Lifecycle.STARTED) {
+            val currentSession = session ?: return
+            currentSession.replaceCallbacks(callbacks)
+            currentSession.setTrackingMode(requestedMode, notifyWhenUnchanged = true)
+            return
+        }
+
+        lifecycle = Lifecycle.STARTING
+        val delivery = newDelivery(expectedEpoch, callbacks)
+        val newSession = Session(delivery)
+        session = newSession
+        if (newSession.start(requestedMode)) {
+            lifecycle = Lifecycle.STARTED
+        } else {
+            newSession.stop()
+            session = null
+            lifecycle = Lifecycle.STOPPED
+            // Keep the failed attempt valid long enough for its queued error to be delivered.
+            failedStartDelivery = delivery
+        }
+    }
+
+    private fun handleStop() {
+        if (lifecycle == Lifecycle.CLOSED) return
+        invalidateDeliveries()
+        stopSession()
+        lifecycle = Lifecycle.STOPPED
+    }
+
+    private fun stopSession() {
+        session?.stop()
+        session = null
+    }
+
+    private fun invalidateDeliveries() {
+        session?.invalidateDelivery()
+        failedStartDelivery?.invalidate()
+        failedStartDelivery = null
+    }
+
+    private fun newDelivery(expectedEpoch: Long, callbacks: Callbacks): Delivery =
+        Delivery(expectedEpoch, callbacks)
+
+    private inner class Session(initialDelivery: Delivery) {
         private val rotationMatrix = FloatArray(9)
         private val orientation = FloatArray(3)
+        private val delivery = initialDelivery
+        private var effectiveMode = TrackingMode.HANDHELD
         private var lastRotationTimestampNanos = 0L
         private var rotationReliable = false
         private var sensorsRegistered = false
-        private var satelliteCount = 0
+        private var locationRegistered = false
+        private var gnssRegistered = false
+        private var satelliteEvidence: SatelliteEvidence? = null
 
         private val estimateTick = object : Runnable {
             override fun run() {
-                if (!isCurrent()) return
-                emitEstimate(estimator.estimateAt(SystemClock.elapsedRealtimeNanos()), activeGeneration)
-                workerHandler.postDelayed(this, OUTPUT_PERIOD_MILLISECONDS)
+                if (!isCurrentStarted()) return
+                emitEstimate(estimator.snapshotAt(worker.elapsedRealtimeNanos()))
+                worker.postDelayed(this, OUTPUT_PERIOD_MILLISECONDS)
             }
         }
 
@@ -135,17 +172,17 @@ class SpeedRepositoryImpl(
             override fun onLocationChanged(location: Location) {
                 if (!isCurrent()) return
                 val measurement = createMeasurement(location)
-                val estimate = estimator.onGnssMeasurement(measurement)
-                emitGnssAvailable(activeGeneration)
-                emitEstimate(estimate, activeGeneration)
+                estimator.ingestGnssMeasurement(measurement)
+                if (measurement.speedMetersPerSecond != null) emitGnssAvailable()
+                emitEstimate(estimator.snapshotAt(location.elapsedRealtimeNanos))
             }
 
             override fun onProviderEnabled(provider: String) = Unit
 
             override fun onProviderDisabled(provider: String) {
                 if (provider == LocationManager.GPS_PROVIDER && isCurrent()) {
-                    updateSatelliteCount(0)
-                    emitError("gps provider disabled", activeGeneration)
+                    clearSatelliteEvidence()
+                    emitError("gps provider disabled")
                 }
             }
 
@@ -155,18 +192,20 @@ class SpeedRepositoryImpl(
 
         private val gnssCallback = object : GnssStatus.Callback() {
             override fun onStopped() {
-                if (isCurrent()) updateSatelliteCount(0)
+                if (isCurrent()) clearSatelliteEvidence()
             }
 
             override fun onSatelliteStatusChanged(status: GnssStatus) {
                 if (!isCurrent()) return
-                updateSatelliteCount((0 until status.satelliteCount).count(status::usedInFix))
+                val count = (0 until status.satelliteCount).count(status::usedInFix)
+                satelliteEvidence = SatelliteEvidence(count, worker.elapsedRealtimeNanos())
+                emitSatelliteCount(count)
             }
         }
 
         private val sensorListener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent) {
-                if (!isCurrent()) return
+                if (!isCurrentStarted()) return
                 when (event.sensor.type) {
                     Sensor.TYPE_ROTATION_VECTOR -> updateRotation(event)
                     Sensor.TYPE_LINEAR_ACCELERATION -> updateAcceleration(event)
@@ -174,6 +213,7 @@ class SpeedRepositoryImpl(
             }
 
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+                if (!isCurrentStarted()) return
                 if (sensor?.type == Sensor.TYPE_ROTATION_VECTOR &&
                     accuracy == SensorManager.SENSOR_STATUS_UNRELIABLE
                 ) {
@@ -182,73 +222,125 @@ class SpeedRepositoryImpl(
             }
         }
 
-        fun start() {
-            updateSatelliteCount(0)
-            if (!registerLocationCallbacks()) return
-            updateSensorRegistration()
-            workerHandler.postDelayed(estimateTick, OUTPUT_PERIOD_MILLISECONDS)
+        fun start(requestedMode: TrackingMode): Boolean {
+            if (!registerLocationCallbacks()) return false
+
+            val fixedModeActive = requestedMode == TrackingMode.FIXED && registerSensors()
+            effectiveMode = if (fixedModeActive) TrackingMode.FIXED else TrackingMode.HANDHELD
+            estimator.reset(effectiveMode)
+            clearSatelliteEvidence()
+            emitTrackingModeChanged(effectiveMode)
+            worker.postDelayed(estimateTick, OUTPUT_PERIOD_MILLISECONDS)
+            return true
         }
 
         fun stop() {
-            workerHandler.removeCallbacks(estimateTick)
-            locationManager.removeUpdates(locationListener)
-            runCatching { locationManager.unregisterGnssStatusCallback(gnssCallback) }
-            sensorManager.unregisterListener(sensorListener)
-            sensorsRegistered = false
-            satelliteCount = 0
+            worker.removeCallbacks(estimateTick)
+            unregisterSensors()
+            if (gnssRegistered) {
+                runCatching { locationGateway.unregisterGnssStatusCallback(gnssCallback) }
+            }
+            if (locationRegistered) {
+                runCatching { locationGateway.removeLocationUpdates(locationListener) }
+            }
+            gnssRegistered = false
+            locationRegistered = false
+            satelliteEvidence = null
         }
 
-        fun updateSensorRegistration() {
-            sensorManager.unregisterListener(sensorListener)
-            sensorsRegistered = false
-            lastRotationTimestampNanos = 0L
-            rotationReliable = false
-            if (trackingMode != TrackingMode.FIXED || !supportsFixedMode || !isCurrent()) return
+        fun replaceCallbacks(callbacks: Callbacks) {
+            delivery.replaceCallbacks(callbacks)
+        }
 
-            val accelerationRegistered = sensorManager.registerListener(
-                sensorListener,
-                linearAccelerationSensor,
-                SENSOR_PERIOD_MICROSECONDS,
-                workerHandler
-            )
-            val rotationRegistered = sensorManager.registerListener(
-                sensorListener,
-                rotationVectorSensor,
-                SENSOR_PERIOD_MICROSECONDS,
-                workerHandler
-            )
-            sensorsRegistered = accelerationRegistered && rotationRegistered
-            if (!sensorsRegistered) sensorManager.unregisterListener(sensorListener)
+        fun invalidateDelivery() {
+            delivery.invalidate()
+        }
+
+        fun setTrackingMode(requestedMode: TrackingMode, notifyWhenUnchanged: Boolean = false) {
+            if (!isCurrentStarted()) return
+            if (requestedMode == effectiveMode) {
+                if (notifyWhenUnchanged) emitTrackingModeChanged(effectiveMode)
+                return
+            }
+
+            if (requestedMode == TrackingMode.HANDHELD) {
+                unregisterSensors()
+                effectiveMode = TrackingMode.HANDHELD
+                estimator.setTrackingMode(effectiveMode)
+                emitTrackingModeChanged(effectiveMode)
+                emitEstimate(estimator.snapshotAt(worker.elapsedRealtimeNanos()))
+                return
+            }
+
+            if (!registerSensors()) {
+                emitTrackingModeChanged(TrackingMode.HANDHELD)
+                return
+            }
+
+            effectiveMode = TrackingMode.FIXED
+            estimator.setTrackingMode(effectiveMode)
+            emitTrackingModeChanged(effectiveMode)
+            emitEstimate(estimator.snapshotAt(worker.elapsedRealtimeNanos()))
         }
 
         private fun registerLocationCallbacks(): Boolean {
-            if (ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.ACCESS_FINE_LOCATION) !=
-                PackageManager.PERMISSION_GRANTED
-            ) {
-                emitError("Precise location permission required", activeGeneration)
+            if (!runCatching { locationGateway.hasFineLocationPermission() }.getOrDefault(false)) {
+                emitPermissionRequired()
                 return false
             }
 
             return try {
-                locationManager.requestLocationUpdates(
-                    LocationManager.GPS_PROVIDER,
-                    0L,
-                    0f,
-                    locationListener,
-                    workerHandler.looper
-                )
-                if (!locationManager.registerGnssStatusCallback(gnssCallback, workerHandler)) {
-                    locationManager.removeUpdates(locationListener)
-                    emitError("Unable to monitor GNSS status", activeGeneration)
+                locationGateway.requestLocationUpdates(locationListener)
+                locationRegistered = true
+                if (!locationGateway.registerGnssStatusCallback(gnssCallback)) {
+                    cleanupLocationCallbacks()
+                    emitError("Unable to monitor GNSS status")
                     false
                 } else {
+                    gnssRegistered = true
                     true
                 }
+            } catch (_: SecurityException) {
+                cleanupLocationCallbacks()
+                emitPermissionRequired()
+                false
             } catch (exception: RuntimeException) {
-                locationManager.removeUpdates(locationListener)
-                emitError("Error starting GPS: ${exception.message}", activeGeneration)
+                cleanupLocationCallbacks()
+                emitError("Error starting GPS: ${exception.message ?: "unknown error"}")
                 false
             }
+        }
+
+        private fun cleanupLocationCallbacks() {
+            runCatching { locationGateway.unregisterGnssStatusCallback(gnssCallback) }
+            runCatching { locationGateway.removeLocationUpdates(locationListener) }
+            gnssRegistered = false
+            locationRegistered = false
+        }
+
+        private fun registerSensors(): Boolean {
+            unregisterSensors()
+            resetSensorState()
+            if (!supportsFixedMode || !isCurrent()) return false
+            sensorsRegistered = runCatching { motionGateway.register(sensorListener) }.getOrDefault(false)
+            if (!sensorsRegistered) runCatching { motionGateway.unregister(sensorListener) }
+            return sensorsRegistered
+        }
+
+        private fun unregisterSensors() {
+            runCatching { motionGateway.unregister(sensorListener) }
+            sensorsRegistered = false
+            resetSensorState()
+        }
+
+        private fun resetSensorState() {
+            lastRotationTimestampNanos = 0L
+            rotationReliable = false
+        }
+
+        private fun clearSatelliteEvidence() {
+            satelliteEvidence = null
+            emitSatelliteCount(0)
         }
 
         private fun createMeasurement(location: Location): GnssMeasurement {
@@ -278,6 +370,11 @@ class SpeedRepositoryImpl(
                     location.time
                 ).declination.toDouble()
             }.getOrNull()
+            val coherentSatelliteCount = satelliteEvidence?.takeIf { evidence ->
+                evidence.observedAtElapsedRealtimeNanos <= location.elapsedRealtimeNanos &&
+                    location.elapsedRealtimeNanos - evidence.observedAtElapsedRealtimeNanos <=
+                    MAX_SATELLITE_EVIDENCE_AGE_NANOS
+            }?.usedInFixCount ?: 0
 
             return GnssMeasurement(
                 speedMetersPerSecond = speed,
@@ -286,7 +383,7 @@ class SpeedRepositoryImpl(
                 bearingAccuracyDegrees = bearingAccuracy,
                 horizontalAccuracyMeters = horizontalAccuracy,
                 magneticDeclinationDegrees = declination,
-                satelliteCount = satelliteCount,
+                satelliteCount = coherentSatelliteCount,
                 timestampNanos = location.elapsedRealtimeNanos
             )
         }
@@ -305,7 +402,8 @@ class SpeedRepositoryImpl(
         private fun updateAcceleration(event: SensorEvent) {
             val orientationAgeNanos = event.timestamp - lastRotationTimestampNanos
             if (!sensorsRegistered || lastRotationTimestampNanos == 0L ||
-                orientationAgeNanos !in 0..MAX_ORIENTATION_AGE_NANOS) return
+                orientationAgeNanos !in 0..MAX_ORIENTATION_AGE_NANOS
+            ) return
 
             val deviceX = event.values[0]
             val deviceY = event.values[1]
@@ -313,7 +411,7 @@ class SpeedRepositoryImpl(
             val east = rotationMatrix[0] * deviceX + rotationMatrix[1] * deviceY + rotationMatrix[2] * deviceZ
             val north = rotationMatrix[3] * deviceX + rotationMatrix[4] * deviceY + rotationMatrix[5] * deviceZ
             val up = rotationMatrix[6] * deviceX + rotationMatrix[7] * deviceY + rotationMatrix[8] * deviceZ
-            estimator.onMotionMeasurement(
+            estimator.ingestMotionMeasurement(
                 MotionMeasurement(
                     accelerationEastMetersPerSecondSquared = east.toDouble(),
                     accelerationMagneticNorthMetersPerSecondSquared = north.toDouble(),
@@ -328,47 +426,102 @@ class SpeedRepositoryImpl(
             )
         }
 
-        private fun updateSatelliteCount(count: Int) {
-            satelliteCount = count
-            emitSatelliteCount(count, activeGeneration)
+        private fun emitEstimate(estimate: SpeedEstimate) {
+            val target = delivery
+            mainDispatcher.post {
+                if (target.valid) target.callbacks.onEstimate(estimate)
+            }
         }
 
-        private fun isCurrent(): Boolean = isActive(activeGeneration) && session === this
+        private fun emitSatelliteCount(count: Int) {
+            val target = delivery
+            mainDispatcher.post {
+                if (target.valid) target.callbacks.onSatelliteCount(count)
+            }
+        }
+
+        private fun emitGnssAvailable() {
+            val target = delivery
+            mainDispatcher.post {
+                if (target.valid) target.callbacks.onGnssAvailable()
+            }
+        }
+
+        private fun emitPermissionRequired() {
+            val target = delivery
+            mainDispatcher.post {
+                if (target.valid) target.callbacks.onPermissionRequired()
+            }
+        }
+
+        private fun emitError(message: String) {
+            val target = delivery
+            mainDispatcher.post {
+                if (target.valid) target.callbacks.onError(message)
+            }
+        }
+
+        private fun emitTrackingModeChanged(mode: TrackingMode) {
+            val target = delivery
+            mainDispatcher.post {
+                if (target.valid) target.callbacks.onTrackingModeChanged(mode)
+            }
+        }
+
+        private fun isCurrent(): Boolean =
+            (lifecycle == Lifecycle.STARTING || lifecycle == Lifecycle.STARTED) && session === this
+
+        private fun isCurrentStarted(): Boolean = lifecycle == Lifecycle.STARTED && session === this
     }
 
-    private fun emitEstimate(estimate: SpeedEstimate, activeGeneration: Int) {
-        mainHandler.post {
-            if (isActive(activeGeneration)) onEstimate?.invoke(estimate)
+    private data class Callbacks(
+        val onEstimate: (SpeedEstimate) -> Unit,
+        val onSatelliteCount: (Int) -> Unit,
+        val onGnssAvailable: () -> Unit,
+        val onPermissionRequired: () -> Unit,
+        val onError: (String) -> Unit,
+        val onTrackingModeChanged: (TrackingMode) -> Unit
+    )
+
+    private inner class Delivery(
+        private val expectedEpoch: Long,
+        callbacks: Callbacks
+    ) {
+        @Volatile
+        var callbacks: Callbacks = callbacks
+            private set
+
+        @Volatile
+        private var enabled: Boolean = true
+
+        val valid: Boolean
+            get() = enabled && expectedEpoch == stopEpoch.get()
+
+        fun replaceCallbacks(callbacks: Callbacks) {
+            this.callbacks = callbacks
+        }
+
+        fun invalidate() {
+            enabled = false
         }
     }
 
-    private fun emitSatelliteCount(count: Int, activeGeneration: Int) {
-        mainHandler.post {
-            if (isActive(activeGeneration)) onSatelliteCount?.invoke(count)
-        }
+    private data class SatelliteEvidence(
+        val usedInFixCount: Int,
+        val observedAtElapsedRealtimeNanos: Long
+    )
+
+    private enum class Lifecycle {
+        STOPPED,
+        STARTING,
+        STARTED,
+        CLOSED
     }
-
-    private fun emitGnssAvailable(activeGeneration: Int) {
-        mainHandler.post {
-            if (isActive(activeGeneration)) onGnssAvailable?.invoke()
-        }
-    }
-
-    private fun emitError(message: String, activeGeneration: Int) {
-        mainHandler.post {
-            if (isActive(activeGeneration)) onError?.invoke(message)
-        }
-    }
-
-    private fun effectiveMode(requested: TrackingMode): TrackingMode =
-        if (requested == TrackingMode.FIXED && supportsFixedMode) requested else TrackingMode.HANDHELD
-
-    private fun isActive(activeGeneration: Int): Boolean = started && generation == activeGeneration
 
     private companion object {
-        const val SENSOR_PERIOD_MICROSECONDS = 20_000
         const val OUTPUT_PERIOD_MILLISECONDS = 100L
         const val MAX_ORIENTATION_AGE_NANOS = 100_000_000L
+        const val MAX_SATELLITE_EVIDENCE_AGE_NANOS = 2_000_000_000L
         val MAX_HEADING_ACCURACY_RADIANS: Double = Math.toRadians(25.0)
     }
 }

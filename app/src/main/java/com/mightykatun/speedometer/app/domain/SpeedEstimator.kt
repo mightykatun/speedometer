@@ -2,6 +2,8 @@ package com.mightykatun.speedometer.app.domain
 
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
 import com.mightykatun.speedometer.app.domain.model.GnssMeasurement
+import com.mightykatun.speedometer.app.domain.model.MaximumCandidate
+import com.mightykatun.speedometer.app.domain.model.MaximumCandidateChange
 import com.mightykatun.speedometer.app.domain.model.MotionMeasurement
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimatorConfig
@@ -56,6 +58,7 @@ class SpeedEstimator(
         var p11: Double = 0.25,
         var lastTimestampNanos: Long = 0L,
         var lastAcceptedGnssNanos: Long = 0L,
+        var firstAcceptedGnssNanos: Long = 0L,
         var lastReliableYawRadians: Double? = null,
         var lastReliablePitchRadians: Double? = null,
         var lastReliableRollRadians: Double? = null,
@@ -95,13 +98,22 @@ class SpeedEstimator(
         var stationaryExitCandidateNanos: Long = 0L
     )
 
-    private data class HistoryEntry(val input: Input, var stateAfter: State)
+    private data class HistoryEntry(
+        val input: Input,
+        var stateAfter: State,
+        var maximumCandidate: MaximumCandidate? = null
+    )
 
     private var mode = TrackingMode.HANDHELD
     private var state = State(p11 = config.initialBiasVariance)
     private var historyBase = state.copy()
     private var historyBaseInputNanos = 0L
-    private val history = mutableListOf<HistoryEntry>()
+    private val history = ArrayList<HistoryEntry>()
+    private var historyStart = 0
+    private val gnssTimestamps = HashSet<Long>()
+    private val motionTimestamps = HashSet<Long>()
+    private val orientationTimestamps = HashSet<Long>()
+    private val pendingCandidateChanges = LinkedHashMap<Long, MaximumCandidateChange>()
 
     fun reset(trackingMode: TrackingMode = mode) {
         mode = trackingMode
@@ -109,36 +121,54 @@ class SpeedEstimator(
         historyBase = state.copy()
         historyBaseInputNanos = 0L
         history.clear()
+        historyStart = 0
+        gnssTimestamps.clear()
+        motionTimestamps.clear()
+        orientationTimestamps.clear()
+        pendingCandidateChanges.clear()
     }
 
     fun setTrackingMode(trackingMode: TrackingMode) {
-        if (mode != trackingMode) reset(trackingMode)
+        if (mode == trackingMode) return
+        val warmupStartTimestampNanos = state.firstAcceptedGnssNanos
+        val finalizedChanges = LinkedHashMap<Long, MaximumCandidateChange.Finalize>()
+        pendingCandidateChanges.values
+            .filterIsInstance<MaximumCandidateChange.Finalize>()
+            .forEach { finalizedChanges[it.id] = it }
+        for (index in historyStart until history.size) {
+            val entry = history[index]
+            if (entry.input is Input.Gnss) {
+                finalizedChanges[entry.input.timestampNanos] = MaximumCandidateChange.Finalize(
+                    id = entry.input.timestampNanos,
+                    candidate = entry.maximumCandidate
+                )
+            }
+        }
+        reset(trackingMode)
+        state.firstAcceptedGnssNanos = warmupStartTimestampNanos
+        historyBase.firstAcceptedGnssNanos = warmupStartTimestampNanos
+        finalizedChanges.values.forEach(::queueCandidateChange)
     }
 
-    fun onGnssMeasurement(measurement: GnssMeasurement): SpeedEstimate {
-        if (measurement.timestampNanos <= 0L) return estimateAt(latestTimestamp(measurement.timestampNanos))
-        if (measurement.timestampNanos <= historyBaseInputNanos) {
-            return estimateAt(latestTimestamp(measurement.timestampNanos))
-        }
-        if (history.any { it.input is Input.Gnss && it.input.timestampNanos == measurement.timestampNanos }) {
-            return estimateAt(latestTimestamp(measurement.timestampNanos))
-        }
+    fun ingestGnssMeasurement(measurement: GnssMeasurement) {
+        if (measurement.timestampNanos <= historyBaseInputNanos || measurement.timestampNanos <= 0L) return
+        if (!gnssTimestamps.add(measurement.timestampNanos)) return
 
-        val newestTimestamp = history.lastOrNull()?.input?.timestampNanos ?: 0L
+        val newestTimestamp = newestHistoryTimestamp()
         if (newestTimestamp - measurement.timestampNanos > config.maximumDelayedGnssNanos) {
-            return estimateAt(newestTimestamp)
+            gnssTimestamps.remove(measurement.timestampNanos)
+            return
         }
 
         insertAndProcess(Input.Gnss(measurement))
-        return estimateAt(latestTimestamp(measurement.timestampNanos))
     }
 
-    fun onMotionMeasurement(measurement: MotionMeasurement): SpeedEstimate {
-        if (!hasFiniteMotionValues(measurement)) return estimateAt(latestTimestamp(measurement.timestampNanos))
-        if (measurement.orientationTimestampNanos > historyBaseInputNanos && history.none {
-                it.input is Input.Orientation &&
-                    it.input.timestampNanos == measurement.orientationTimestampNanos
-            }
+    fun ingestMotionMeasurement(measurement: MotionMeasurement) {
+        if (!hasFiniteMotionValues(measurement)) return
+        if (measurement.timestampNanos <= historyBaseInputNanos) return
+        if (!motionTimestamps.add(measurement.timestampNanos)) return
+        if (measurement.orientationTimestampNanos > historyBaseInputNanos &&
+            orientationTimestamps.add(measurement.orientationTimestampNanos)
         ) {
             insertAndProcess(
                 Input.Orientation(
@@ -150,22 +180,27 @@ class SpeedEstimator(
                 )
             )
         }
-        if (measurement.timestampNanos <= historyBaseInputNanos) {
-            return estimateAt(latestTimestamp(measurement.timestampNanos))
-        }
         insertAndProcess(Input.Motion(measurement))
-        return estimateAt(latestTimestamp(measurement.timestampNanos))
     }
 
-    fun estimateAt(timestampNanos: Long): SpeedEstimate {
+    fun snapshotAt(timestampNanos: Long): SpeedEstimate {
+        val snapshotTimestamp = latestTimestamp(timestampNanos)
+        val candidateChanges = drainCandidateChanges()
         if (!state.initialized) {
-            return SpeedEstimate(null, Double.POSITIVE_INFINITY, EstimateQuality.ACQUIRING, false, timestampNanos)
+            return SpeedEstimate(
+                speedMetersPerSecond = null,
+                uncertaintyMetersPerSecond = Double.POSITIVE_INFINITY,
+                quality = EstimateQuality.ACQUIRING,
+                timestampNanos = snapshotTimestamp,
+                maximumWarmupStartTimestampNanos = state.firstAcceptedGnssNanos,
+                maximumCandidateChanges = candidateChanges
+            )
         }
 
-        val elapsedSincePrediction = max(0L, timestampNanos - state.lastTimestampNanos) / NANOS_PER_SECOND
+        val elapsedSincePrediction = max(0L, snapshotTimestamp - state.lastTimestampNanos) / NANOS_PER_SECOND
         val projectedVariance = state.p00 + config.fallbackVelocityProcessNoise * elapsedSincePrediction
         val uncertainty = sqrt(max(0.0, projectedVariance))
-        val age = max(0L, timestampNanos - state.lastAcceptedGnssNanos)
+        val age = max(0L, snapshotTimestamp - state.lastAcceptedGnssNanos)
         val quality = when {
             age <= config.trackingAgeNanos &&
                 2.0 * uncertainty <= config.maximumTrackingTwoSigmaMetersPerSecond -> EstimateQuality.TRACKING
@@ -177,65 +212,72 @@ class SpeedEstimator(
             else -> if (state.stationary) 0.0 else max(0.0, state.speed)
         }
 
-        val rawGnssUncertainty = state.lastGnssSigma?.let {
-            config.speedAccuracyInflation * max(it, config.minimumSpeedAccuracyMetersPerSecond)
-        } ?: Double.POSITIVE_INFINITY
-        val trustedForMaximum = quality == EstimateQuality.TRACKING && !state.stationary &&
-            !state.maximumTrustProbation && age <= config.maximumTrustedGnssAgeNanos &&
-            2.0 * rawGnssUncertainty <= config.maximumTrustedTwoSigmaMetersPerSecond
         return SpeedEstimate(
             speedMetersPerSecond = displaySpeed,
             uncertaintyMetersPerSecond = uncertainty,
             quality = quality,
-            trustedForMaximum = trustedForMaximum,
-            timestampNanos = timestampNanos,
-            maximumCandidateMetersPerSecond = state.lastGnssSpeed.takeIf { trustedForMaximum },
-            maximumCandidateTimestampNanos = state.lastGnssCorrectionNanos.takeIf { trustedForMaximum } ?: 0L,
-            maximumCandidateSatelliteCount = state.lastGnssSatelliteCount.takeIf { trustedForMaximum } ?: 0
+            timestampNanos = snapshotTimestamp,
+            maximumWarmupStartTimestampNanos = state.firstAcceptedGnssNanos,
+            maximumCandidateChanges = candidateChanges
         )
     }
 
+    fun onGnssMeasurement(measurement: GnssMeasurement): SpeedEstimate {
+        ingestGnssMeasurement(measurement)
+        return snapshotAt(measurement.timestampNanos)
+    }
+
+    fun onMotionMeasurement(measurement: MotionMeasurement) {
+        ingestMotionMeasurement(measurement)
+    }
+
+    fun estimateAt(timestampNanos: Long): SpeedEstimate = snapshotAt(timestampNanos)
+
     private fun insertAndProcess(input: Input) {
-        val insertionIndex = history.indexOfFirst {
-            it.input.timestampNanos > input.timestampNanos ||
-                it.input.timestampNanos == input.timestampNanos && inputPriority(input) < inputPriority(it.input)
-        }.let { if (it < 0) history.size else it }
+        val insertionIndex = insertionIndex(input)
 
         if (insertionIndex == history.size) {
-            process(input)
-            history += HistoryEntry(input, state.copy())
+            val candidate = process(input)
+            history += HistoryEntry(input, state.copy(), candidate)
+            candidate?.let { queueCandidateChange(MaximumCandidateChange.Upsert(it)) }
         } else {
-            state = if (insertionIndex == 0) historyBase.copy() else history[insertionIndex - 1].stateAfter.copy()
+            state = if (insertionIndex == historyStart) {
+                historyBase.copy()
+            } else {
+                history[insertionIndex - 1].stateAfter.copy()
+            }
             history.add(insertionIndex, HistoryEntry(input, state.copy()))
             for (index in insertionIndex until history.size) {
-                process(history[index].input)
+                val oldCandidate = history[index].maximumCandidate
+                val newCandidate = process(history[index].input)
                 history[index].stateAfter = state.copy()
+                history[index].maximumCandidate = newCandidate
+                queueCandidateDifference(history[index].input, oldCandidate, newCandidate)
             }
         }
-        pruneHistory(history.last().input.timestampNanos)
+        pruneHistory(newestHistoryTimestamp())
     }
 
-    private fun process(input: Input) {
+    private fun process(input: Input): MaximumCandidate? =
         when (input) {
             is Input.Gnss -> processGnss(input.measurement)
-            is Input.Motion -> processMotion(input.measurement)
-            is Input.Orientation -> processOrientation(input)
+            is Input.Motion -> processMotion(input.measurement).let { null }
+            is Input.Orientation -> processOrientation(input).let { null }
         }
-    }
 
-    private fun processGnss(measurement: GnssMeasurement) {
+    private fun processGnss(measurement: GnssMeasurement): MaximumCandidate? {
         invalidateCourseIfUnusable(measurement, measurement.speedMetersPerSecond)
         if (!isUsableMeasurement(measurement)) {
             state.outlierCount = 0
-            return
+            return null
         }
 
-        val speed = measurement.speedMetersPerSecond ?: return
+        val speed = measurement.speedMetersPerSecond ?: return null
         val sigma = measurement.speedAccuracyMetersPerSecond
             ?: config.missingSpeedAccuracyMetersPerSecond
         if (sigma > config.maximumSpeedAccuracyMetersPerSecond) {
             state.outlierCount = 0
-            return
+            return null
         }
         predict(measurement.timestampNanos, null)
         val variance = measurementVariance(sigma)
@@ -246,7 +288,7 @@ class SpeedEstimator(
             recordGnssCorrection(speed, sigma, measurement.satelliteCount, measurement.timestampNanos)
             updateCourse(measurement, speed)
             updateStationaryState(measurement, sigma, speed)
-            return
+            return maximumCandidate(measurement.timestampNanos)
         }
 
         val innovation = speed - state.speed
@@ -258,7 +300,7 @@ class SpeedEstimator(
             } else {
                 config.movingReacquisitionRequiredFixes
             }
-            if (!considerReacquisition(speed, sigma, measurement.timestampNanos, requiredFixes)) return
+            if (!considerReacquisition(speed, sigma, measurement.timestampNanos, requiredFixes)) return null
         } else {
             state.outlierCount = 0
             if (state.stationary && speed > config.stationarySpeedMetersPerSecond) {
@@ -272,6 +314,7 @@ class SpeedEstimator(
         recordGnssCorrection(speed, sigma, measurement.satelliteCount, measurement.timestampNanos)
         updateCourse(measurement, speed)
         updateStationaryState(measurement, sigma, speed)
+        return maximumCandidate(measurement.timestampNanos)
     }
 
     private fun processOrientation(orientation: Input.Orientation) {
@@ -715,6 +758,7 @@ class SpeedEstimator(
     }
 
     private fun recordGnssCorrection(speed: Double, sigma: Double, satelliteCount: Int, timestampNanos: Long) {
+        if (state.firstAcceptedGnssNanos == 0L) state.firstAcceptedGnssNanos = timestampNanos
         state.lastAcceptedGnssNanos = timestampNanos
         state.lastGnssCorrectionNanos = timestampNanos
         state.lastGnssSpeed = speed
@@ -743,13 +787,87 @@ class SpeedEstimator(
         is Input.Gnss -> 2
     }
 
+    private fun maximumCandidate(timestampNanos: Long): MaximumCandidate? {
+        val uncertainty = sqrt(max(0.0, state.p00))
+        val rawGnssUncertainty = state.lastGnssSigma?.let {
+            config.speedAccuracyInflation * max(it, config.minimumSpeedAccuracyMetersPerSecond)
+        } ?: return null
+        val trusted = !state.stationary && !state.maximumTrustProbation &&
+            2.0 * uncertainty <= config.maximumTrackingTwoSigmaMetersPerSecond &&
+            2.0 * rawGnssUncertainty <= config.maximumTrustedTwoSigmaMetersPerSecond
+        if (!trusted || state.lastGnssCorrectionNanos != timestampNanos) return null
+        return MaximumCandidate(
+            id = timestampNanos,
+            speedMetersPerSecond = state.lastGnssSpeed ?: return null,
+            timestampNanos = timestampNanos,
+            satelliteCount = state.lastGnssSatelliteCount
+        )
+    }
+
+    private fun insertionIndex(input: Input): Int {
+        var low = historyStart
+        var high = history.size
+        while (low < high) {
+            val middle = (low + high).ushr(1)
+            val existing = history[middle].input
+            val existingComesFirst = existing.timestampNanos < input.timestampNanos ||
+                existing.timestampNanos == input.timestampNanos &&
+                inputPriority(existing) <= inputPriority(input)
+            if (existingComesFirst) low = middle + 1 else high = middle
+        }
+        return low
+    }
+
+    private fun queueCandidateDifference(
+        input: Input,
+        oldCandidate: MaximumCandidate?,
+        newCandidate: MaximumCandidate?
+    ) {
+        if (input !is Input.Gnss || oldCandidate == newCandidate) return
+        queueCandidateChange(
+            newCandidate?.let(MaximumCandidateChange::Upsert)
+                ?: MaximumCandidateChange.Retract(input.timestampNanos)
+        )
+    }
+
+    private fun queueCandidateChange(change: MaximumCandidateChange) {
+        pendingCandidateChanges[change.id] = change
+    }
+
+    private fun drainCandidateChanges(): List<MaximumCandidateChange> {
+        if (pendingCandidateChanges.isEmpty()) return emptyList()
+        val changes = pendingCandidateChanges.values.toList()
+        pendingCandidateChanges.clear()
+        return changes
+    }
+
     private fun pruneHistory(newestTimestampNanos: Long) {
         val cutoff = newestTimestampNanos - config.replayHistoryNanos
-        while (history.isNotEmpty() && history.first().input.timestampNanos < cutoff) {
-            val removed = history.removeAt(0)
+        while (historyStart < history.size && history[historyStart].input.timestampNanos < cutoff) {
+            val removed = history[historyStart++]
+            when (removed.input) {
+                is Input.Gnss -> {
+                    gnssTimestamps.remove(removed.input.timestampNanos)
+                    queueCandidateChange(
+                        MaximumCandidateChange.Finalize(
+                            id = removed.input.timestampNanos,
+                            candidate = removed.maximumCandidate
+                        )
+                    )
+                }
+                is Input.Motion -> motionTimestamps.remove(removed.input.timestampNanos)
+                is Input.Orientation -> orientationTimestamps.remove(removed.input.timestampNanos)
+            }
             historyBase = removed.stateAfter.copy()
             historyBaseInputNanos = removed.input.timestampNanos
         }
+        compactHistoryIfNeeded()
+    }
+
+    private fun compactHistoryIfNeeded() {
+        if (historyStart < HISTORY_COMPACTION_MINIMUM_PREFIX || historyStart * 2 < history.size) return
+        history.subList(0, historyStart).clear()
+        historyStart = 0
     }
 
     private fun isUsableMeasurement(measurement: GnssMeasurement): Boolean {
@@ -780,8 +898,10 @@ class SpeedEstimator(
             accelerationUpMetersPerSecondSquared * accelerationUpMetersPerSecondSquared
     )
 
-    private fun latestTimestamp(candidate: Long): Long =
-        max(candidate, history.lastOrNull()?.input?.timestampNanos ?: candidate)
+    private fun newestHistoryTimestamp(): Long =
+        if (historyStart < history.size) history.last().input.timestampNanos else 0L
+
+    private fun latestTimestamp(candidate: Long): Long = max(candidate, newestHistoryTimestamp())
 
     private fun angleDelta(first: Double, second: Double): Double = normalizeRadians(first - second)
 
@@ -797,5 +917,6 @@ class SpeedEstimator(
 
     private companion object {
         const val NANOS_PER_SECOND = 1_000_000_000.0
+        const val HISTORY_COMPACTION_MINIMUM_PREFIX = 512
     }
 }

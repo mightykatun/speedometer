@@ -11,7 +11,9 @@ interface SpeedRepository {
         onEstimate: (SpeedEstimate) -> Unit,
         onSatelliteCount: (Int) -> Unit,
         onGnssAvailable: () -> Unit,
-        onError: (String) -> Unit
+        onPermissionRequired: () -> Unit,
+        onError: (String) -> Unit,
+        onTrackingModeChanged: (TrackingMode) -> Unit
     )
 
     fun setTrackingMode(trackingMode: TrackingMode)

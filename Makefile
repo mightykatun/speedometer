@@ -38,8 +38,8 @@ clean:
 	$(GRADLE) clean
 
 # Install Release APK via ADB (if phone is connected via USB)
-install: release
-	adb install -r $(RELEASE_APK)
+install: debug
+	adb install -r $(DEBUG_APK)
 
 # View logs for your app specifically
 log:
@@ -50,6 +50,6 @@ help:
 	@echo "Available targets:"
 	@echo "  make release   - Build Release APK (Default)"
 	@echo "  make debug     - Build Debug APK"
-	@echo "  make install   - Build Release & Install to connected device"
+	@echo "  make install   - Build Debug & Install to connected device"
 	@echo "  make clean     - Clean project"
 	@echo "  make log       - Filter logcat for this app"

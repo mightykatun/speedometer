@@ -12,61 +12,145 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release-${{ inputs.tag || github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    env:
-      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-      RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-      RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-      RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-      RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  RELEASE_REF: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+  TRIGGER_REF: ${{ github.ref }}
 
+jobs:
+  build:
+    runs-on: ubuntu-latest
     steps:
       - name: Check out release commit
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ env.RELEASE_REF }}
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
 
       - name: Validate tag and app version
         shell: bash
         run: |
           set -euo pipefail
-          version_name="$(perl -ne 'print $1 if /versionName = "([^"]+)"/' app/build.gradle.kts)"
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
+          if test "$GITHUB_EVENT_NAME" = "workflow_dispatch"; then
+            test "$TRIGGER_REF" = "refs/tags/$RELEASE_TAG"
+          fi
+          git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
+          version_name="$(perl -ne 'print $1 if /versionName = "([^\"]+)"/' app/build.gradle.kts)"
           test -n "$version_name"
           test "$RELEASE_TAG" = "v$version_name"
 
       - name: Set up Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: "21"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
 
       - name: Install Android SDK packages
         shell: bash
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Select signing mode
-        id: build
+      - name: Test, lint, and build unsigned artifacts
+        shell: bash
+        run: ./gradlew --no-build-cache clean test lint assembleDebug stageReleaseSbomInputs
+
+      - name: Generate SPDX SBOM
         shell: bash
         run: |
           set -euo pipefail
+          archive="$RUNNER_TEMP/syft.tar.gz"
+          tool_dir="$RUNNER_TEMP/syft"
+          curl --fail --location --silent --show-error \
+            --output "$archive" \
+            https://github.com/anchore/syft/releases/download/v1.42.3/syft_1.42.3_linux_amd64.tar.gz
+          printf '%s  %s\n' \
+            0d6be741479eddd2c8644a288990c04f3df0d609bbc1599a005532a9dff63509 \
+            "$archive" | sha256sum --check --strict
+          mkdir -p "$tool_dir"
+          tar --extract --gzip --file "$archive" --directory "$tool_dir" syft
+          "$tool_dir/syft" scan dir:app/build/sbom-inputs \
+            --exclude '**/resolved-artifacts/**' \
+            --source-name speedometer \
+            --source-version "${RELEASE_TAG#v}" \
+            --output "spdx-json=speedometer-${RELEASE_TAG}.spdx.json"
+
+      - name: Package build inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/app-debug.apk
+          cp app/build/outputs/apk/release/app-release-unsigned.apk dist/app-release-unsigned.apk
+          cp "speedometer-${RELEASE_TAG}.spdx.json" dist/
+          git archive \
+            --format=zip \
+            --prefix="speedometer-${RELEASE_TAG}/" \
+            --output="dist/speedometer-${RELEASE_TAG}-source.zip" \
+            HEAD
+
+      - name: Preserve unsigned build inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-${{ env.RELEASE_TAG }}
+          path: dist/
+          if-no-files-found: error
+
+  sign:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release-signing
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      prerelease: ${{ steps.sign.outputs.prerelease }}
+    steps:
+      - name: Download unsigned build inputs
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: unsigned-${{ env.RELEASE_TAG }}
+          path: inputs
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+
+      - name: Install APK signer
+        shell: bash
+        run: sdkmanager "build-tools;35.0.0"
+
+      - name: Select signing mode and sign APK
+        id: sign
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_CERT_SHA256: ${{ secrets.RELEASE_CERT_SHA256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
           configured=0
           for value in \
             "$RELEASE_KEYSTORE_BASE64" \
             "$RELEASE_KEY_ALIAS" \
             "$RELEASE_KEY_PASSWORD" \
-            "$RELEASE_STORE_PASSWORD"; do
+            "$RELEASE_STORE_PASSWORD" \
+            "$RELEASE_CERT_SHA256"; do
             if test -n "$value"; then
               configured=$((configured + 1))
             fi
@@ -74,51 +158,69 @@ jobs:
 
           if test "$configured" -eq 0; then
             echo "No signing secrets found; creating a debug-signed test prerelease."
-            echo "task=assembleDebug" >> "$GITHUB_OUTPUT"
-            echo "apk=app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_OUTPUT"
-            echo "suffix=-test" >> "$GITHUB_OUTPUT"
+            cp inputs/app-debug.apk "dist/speedometer-${RELEASE_TAG}-test.apk"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          elif test "$configured" -eq 4; then
-            printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > app/release-key.jks
-            {
-              printf 'keyAlias=%s\n' "$RELEASE_KEY_ALIAS"
-              printf 'keyPassword=%s\n' "$RELEASE_KEY_PASSWORD"
-              printf 'storeFile=release-key.jks\n'
-              printf 'storePassword=%s\n' "$RELEASE_STORE_PASSWORD"
-            } > keystore.properties
-            echo "task=assembleRelease" >> "$GITHUB_OUTPUT"
-            echo "apk=app/build/outputs/apk/release/app-release.apk" >> "$GITHUB_OUTPUT"
-            echo "suffix=" >> "$GITHUB_OUTPUT"
+          elif test "$configured" -eq 5; then
+            trap 'rm -f release-key.jks' EXIT
+            printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > release-key.jks
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
+              --ks release-key.jks \
+              --ks-key-alias "$RELEASE_KEY_ALIAS" \
+              --ks-pass env:RELEASE_STORE_PASSWORD \
+              --key-pass env:RELEASE_KEY_PASSWORD \
+              --out "dist/speedometer-${RELEASE_TAG}.apk" \
+              inputs/app-release-unsigned.apk
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
+              --verbose \
+              "dist/speedometer-${RELEASE_TAG}.apk"
+            actual_cert_sha256="$(
+              "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs \
+                "dist/speedometer-${RELEASE_TAG}.apk" |
+                perl -ne 'print lc($1) if /Signer #1 certificate SHA-256 digest: ([0-9a-fA-F]+)/'
+            )"
+            expected_cert_sha256="$(printf '%s' "$RELEASE_CERT_SHA256" | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
+            test -n "$actual_cert_sha256"
+            test "$actual_cert_sha256" = "$expected_cert_sha256"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Signing is partially configured; set all four release secrets or remove them all." >&2
+            echo "Signing is partially configured; set all five release values or remove them all." >&2
             exit 1
           fi
-
-      - name: Test, lint, and build
-        shell: bash
-        run: ./gradlew clean test lint "${{ steps.build.outputs.task }}"
 
       - name: Package release assets
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
-          artifact_name="speedometer-${RELEASE_TAG}${{ steps.build.outputs.suffix }}.apk"
-          cp "${{ steps.build.outputs.apk }}" "dist/$artifact_name"
-          git archive \
-            --format=zip \
-            --prefix="speedometer-${RELEASE_TAG}/" \
-            --output="dist/speedometer-${RELEASE_TAG}-source.zip" \
-            HEAD
-          (cd dist && sha256sum *.apk *.zip > SHA256SUMS.txt)
+          cp "inputs/speedometer-${RELEASE_TAG}-source.zip" dist/
+          cp "inputs/speedometer-${RELEASE_TAG}.spdx.json" dist/
+          (cd dist && sha256sum *.apk *.json *.zip > SHA256SUMS.txt)
 
-      - name: Preserve workflow artifacts
-        uses: actions/upload-artifact@v4
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: |
+            dist/*.apk
+            dist/*.json
+            dist/*.zip
+
+      - name: Preserve release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: speedometer-${{ env.RELEASE_TAG }}
           path: dist/
           if-no-files-found: error
+
+  publish:
+    needs: sign
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: speedometer-${{ env.RELEASE_TAG }}
+          path: dist
 
       - name: Publish GitHub release
         env:
@@ -126,13 +228,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          (cd dist && sha256sum --check SHA256SUMS.txt)
           flags=(--verify-tag --generate-notes --title "Speedometer $RELEASE_TAG")
-          if test "${{ steps.build.outputs.prerelease }}" = "true"; then
+          if test "${{ needs.sign.outputs.prerelease }}" = "true"; then
             flags+=(--prerelease)
           fi
           gh release create \
             "$RELEASE_TAG" \
             dist/*.apk \
+            dist/*.json \
             dist/*.zip \
             dist/SHA256SUMS.txt \
             "${flags[@]}" \

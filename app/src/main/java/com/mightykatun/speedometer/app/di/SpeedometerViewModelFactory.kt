@@ -5,7 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import com.mightykatun.speedometer.app.SpeedometerViewModel
 import com.mightykatun.speedometer.app.domain.SessionStatisticsTracker
 import com.mightykatun.speedometer.app.domain.model.SessionConfig
-import com.mightykatun.speedometer.app.domain.time.ProductionTimeProvider
+import com.mightykatun.speedometer.app.domain.time.AndroidElapsedRealtimeClock
 
 class SpeedometerViewModelFactory : ViewModelProvider.Factory {
     
@@ -23,8 +23,8 @@ class SpeedometerViewModelFactory : ViewModelProvider.Factory {
     
     private fun createSpeedometerViewModel(): SpeedometerViewModel {
         val config = SessionConfig()
-        val timeProvider = ProductionTimeProvider()
-        val sessionTracker = SessionStatisticsTracker(config, timeProvider)
+        val clock = AndroidElapsedRealtimeClock()
+        val sessionTracker = SessionStatisticsTracker(config, clock)
 
         return SpeedometerViewModel(sessionTracker)
     }

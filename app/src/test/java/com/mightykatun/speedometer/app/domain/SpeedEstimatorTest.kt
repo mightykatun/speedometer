@@ -2,7 +2,9 @@ package com.mightykatun.speedometer.app.domain
 
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
 import com.mightykatun.speedometer.app.domain.model.GnssMeasurement
+import com.mightykatun.speedometer.app.domain.model.MaximumCandidateChange
 import com.mightykatun.speedometer.app.domain.model.MotionMeasurement
+import com.mightykatun.speedometer.app.domain.model.SpeedEstimatorConfig
 import com.mightykatun.speedometer.app.domain.model.TrackingMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -69,13 +71,13 @@ class SpeedEstimatorTest {
         val estimate = estimator.onGnssMeasurement(gnss(30.1, 0.1, seconds(3)))
 
         assertEquals(30.0, estimate.speedMetersPerSecond!!, 0.2)
-        assertFalse(estimate.trustedForMaximum)
-        assertNull(estimate.maximumCandidateMetersPerSecond)
+        assertTrue(estimate.maximumCandidateChanges.isEmpty())
 
         val confirmed = estimator.onGnssMeasurement(gnss(30.0, 0.1, seconds(4)))
 
-        assertTrue(confirmed.trustedForMaximum)
-        assertEquals(30.0, confirmed.maximumCandidateMetersPerSecond!!, 0.0001)
+        val candidate = confirmed.maximumCandidateChanges.single() as
+            com.mightykatun.speedometer.app.domain.model.MaximumCandidateChange.Upsert
+        assertEquals(30.0, candidate.candidate.speedMetersPerSecond, 0.0001)
     }
 
     @Test
@@ -110,22 +112,22 @@ class SpeedEstimatorTest {
 
         val prediction = estimator.estimateAt(seconds(2))
 
-        assertTrue(gnssEstimate.trustedForMaximum)
+        assertTrue(gnssEstimate.maximumCandidateChanges.isNotEmpty())
         assertEquals(EstimateQuality.TRACKING, prediction.quality)
-        assertTrue(!prediction.trustedForMaximum)
+        assertTrue(prediction.maximumCandidateChanges.isEmpty())
     }
 
     @Test
-    fun `inertial prediction exposes only the raw GNSS maximum candidate`() {
+    fun `inertial prediction does not expose a maximum candidate`() {
         val estimator = fixedEstimatorWithSeed()
         estimator.onMotionMeasurement(motion(1.0, seconds(1) + 20_000_000L))
         estimator.onMotionMeasurement(motion(1.0, seconds(1) + 40_000_000L))
 
-        val estimate = estimator.onMotionMeasurement(motion(1.0, seconds(1) + 60_000_000L))
+        estimator.onMotionMeasurement(motion(1.0, seconds(1) + 60_000_000L))
+        val estimate = estimator.snapshotAt(seconds(1) + 60_000_000L)
 
         assertTrue(estimate.speedMetersPerSecond!! > 10.0)
-        assertTrue(estimate.trustedForMaximum)
-        assertEquals(10.0, estimate.maximumCandidateMetersPerSecond!!, 0.0001)
+        assertTrue(estimate.maximumCandidateChanges.isEmpty())
     }
 
     @Test
@@ -148,7 +150,8 @@ class SpeedEstimatorTest {
 
         estimator.onMotionMeasurement(motion(1.0, seconds(1) + 110_000_000L))
         estimator.onMotionMeasurement(motion(1.0, seconds(1) + 210_000_000L))
-        val estimate = estimator.onMotionMeasurement(motion(1.0, seconds(1) + 310_000_000L))
+        estimator.onMotionMeasurement(motion(1.0, seconds(1) + 310_000_000L))
+        val estimate = estimator.snapshotAt(seconds(1) + 310_000_000L)
 
         assertTrue(estimate.speedMetersPerSecond!! > 10.05)
     }
@@ -191,7 +194,8 @@ class SpeedEstimatorTest {
         val estimator = fixedEstimatorWithSeed()
         estimator.onGnssMeasurement(gnss(1.0, 0.1, seconds(2), bearing = null))
 
-        val estimate = estimator.onMotionMeasurement(motion(-10.0, seconds(2) + 100_000_000L))
+        estimator.onMotionMeasurement(motion(-10.0, seconds(2) + 100_000_000L))
+        val estimate = estimator.snapshotAt(seconds(2) + 100_000_000L)
 
         assertEquals(10.0, estimate.speedMetersPerSecond!!, 0.0001)
     }
@@ -239,6 +243,98 @@ class SpeedEstimatorTest {
             delayed.estimateAt(seconds(1) + 200_000_000L).speedMetersPerSecond!!,
             1e-9
         )
+    }
+
+    @Test
+    fun `delayed GNSS retracts a later candidate invalidated by replay`() {
+        val estimator = SpeedEstimator()
+        estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1)))
+        estimator.onGnssMeasurement(gnss(20.0, 0.1, seconds(3)))
+        val acceptedBeforeReplay = estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(4)))
+
+        val replayed = estimator.onGnssMeasurement(gnss(20.0, 0.1, seconds(2)))
+
+        assertTrue(
+            acceptedBeforeReplay.maximumCandidateChanges.any {
+                it is MaximumCandidateChange.Upsert && it.id == seconds(4)
+            }
+        )
+        assertTrue(
+            replayed.maximumCandidateChanges.any {
+                it is MaximumCandidateChange.Retract && it.id == seconds(4)
+            }
+        )
+    }
+
+    @Test
+    fun `candidate finalizes at replay boundary and cannot be changed afterward`() {
+        val estimator = SpeedEstimator(
+            SpeedEstimatorConfig(
+                replayHistoryNanos = seconds(1),
+                maximumDelayedGnssNanos = seconds(1)
+            )
+        )
+        estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1)))
+
+        estimator.ingestMotionMeasurement(motion(0.0, seconds(2) + 100_000_000L))
+        val finalized = estimator.snapshotAt(seconds(2) + 100_000_000L)
+        estimator.ingestGnssMeasurement(gnss(30.0, 0.1, seconds(1)))
+        val afterLateDuplicate = estimator.snapshotAt(seconds(2) + 100_000_000L)
+
+        val change = finalized.maximumCandidateChanges.single {
+            it is MaximumCandidateChange.Finalize && it.id == seconds(1)
+        } as MaximumCandidateChange.Finalize
+        assertEquals(10.0, change.candidate!!.speedMetersPerSecond, 0.0)
+        assertTrue(afterLateDuplicate.maximumCandidateChanges.isEmpty())
+    }
+
+    @Test
+    fun `duplicate motion is idempotent for filters covariance and bias`() {
+        fun result(duplicate: Boolean): Pair<Double, Double> {
+            val estimator = fixedEstimatorWithSeed()
+            val sample = motion(0.3, seconds(1) + 20_000_000L)
+            estimator.ingestMotionMeasurement(sample)
+            if (duplicate) estimator.ingestMotionMeasurement(sample)
+            estimator.ingestMotionMeasurement(motion(0.3, seconds(1) + 40_000_000L))
+            estimator.ingestMotionMeasurement(motion(0.3, seconds(1) + 60_000_000L))
+            val estimate = estimator.snapshotAt(seconds(1) + 60_000_000L)
+            return estimate.speedMetersPerSecond!! to estimate.uncertaintyMetersPerSecond
+        }
+
+        val once = result(duplicate = false)
+        val twice = result(duplicate = true)
+
+        assertEquals(once.first, twice.first, 0.0)
+        assertEquals(once.second, twice.second, 0.0)
+    }
+
+    @Test
+    fun `distinct motion samples may share one orientation identity`() {
+        val estimator = fixedEstimatorWithSeed()
+        val orientationTime = seconds(1) + 10_000_000L
+
+        estimator.ingestMotionMeasurement(
+            motion(1.0, seconds(1) + 20_000_000L, orientationTimestampNanos = orientationTime)
+        )
+        estimator.ingestMotionMeasurement(
+            motion(1.0, seconds(1) + 40_000_000L, orientationTimestampNanos = orientationTime)
+        )
+        estimator.ingestMotionMeasurement(
+            motion(1.0, seconds(1) + 60_000_000L, orientationTimestampNanos = orientationTime)
+        )
+
+        assertTrue(estimator.snapshotAt(seconds(1) + 60_000_000L).speedMetersPerSecond!! > 10.0)
+    }
+
+    @Test
+    fun `delayed first accepted fix deterministically moves warmup anchor`() {
+        val estimator = SpeedEstimator()
+        val initiallyFirst = estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(3)))
+
+        val replayed = estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1)))
+
+        assertEquals(seconds(3), initiallyFirst.maximumWarmupStartTimestampNanos)
+        assertEquals(seconds(1), replayed.maximumWarmupStartTimestampNanos)
     }
 
     @Test
@@ -314,7 +410,7 @@ class SpeedEstimatorTest {
         val estimate = estimator.onGnssMeasurement(gnss(20.0, 0.1, seconds(4)))
 
         assertEquals(0.0, estimate.speedMetersPerSecond!!, 0.0)
-        assertFalse(estimate.trustedForMaximum)
+        assertTrue(estimate.maximumCandidateChanges.isEmpty())
     }
 
     @Test
@@ -322,7 +418,8 @@ class SpeedEstimatorTest {
         val estimator = fixedEstimatorWithSeed()
         estimator.onMotionMeasurement(motion(0.0, seconds(1) + 20_000_000L))
         estimator.onMotionMeasurement(motion(8.0, seconds(1) + 40_000_000L))
-        val estimate = estimator.onMotionMeasurement(motion(0.0, seconds(1) + 60_000_000L))
+        estimator.onMotionMeasurement(motion(0.0, seconds(1) + 60_000_000L))
+        val estimate = estimator.snapshotAt(seconds(1) + 60_000_000L)
 
         assertEquals(10.0, estimate.speedMetersPerSecond!!, 0.01)
     }
@@ -335,11 +432,13 @@ class SpeedEstimatorTest {
         estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1) + 110_000_000L, bearing = 0.0))
         estimator.onMotionMeasurement(motion(2.0, seconds(1) + 120_000_000L))
         estimator.onMotionMeasurement(motion(2.0, seconds(1) + 140_000_000L))
-        val quarantined = estimator.onMotionMeasurement(motion(2.0, seconds(1) + 160_000_000L))
+        estimator.onMotionMeasurement(motion(2.0, seconds(1) + 160_000_000L))
+        val quarantined = estimator.snapshotAt(seconds(1) + 160_000_000L)
 
         estimator.onMotionMeasurement(motion(2.0, seconds(1) + 540_000_000L))
         estimator.onMotionMeasurement(motion(2.0, seconds(1) + 560_000_000L))
-        val recovered = estimator.onMotionMeasurement(motion(2.0, seconds(1) + 580_000_000L))
+        estimator.onMotionMeasurement(motion(2.0, seconds(1) + 580_000_000L))
+        val recovered = estimator.snapshotAt(seconds(1) + 580_000_000L)
 
         assertEquals(10.0, quarantined.speedMetersPerSecond!!, 0.0001)
         assertTrue(recovered.speedMetersPerSecond!! > 10.0)
@@ -353,7 +452,8 @@ class SpeedEstimatorTest {
         estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1) + 200_000_000L, bearing = 0.0))
         estimator.onMotionMeasurement(motion(2.0, seconds(1) + 220_000_000L))
         estimator.onMotionMeasurement(motion(2.0, seconds(1) + 240_000_000L))
-        val estimate = estimator.onMotionMeasurement(motion(2.0, seconds(1) + 260_000_000L))
+        estimator.onMotionMeasurement(motion(2.0, seconds(1) + 260_000_000L))
+        val estimate = estimator.snapshotAt(seconds(1) + 260_000_000L)
 
         assertEquals(10.0, estimate.speedMetersPerSecond!!, 0.0001)
     }
@@ -371,7 +471,8 @@ class SpeedEstimatorTest {
         )
         estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1) + 50_000_000L, bearing = 0.0))
         estimator.onMotionMeasurement(motion(1.0, seconds(1) + 110_000_000L))
-        val estimate = estimator.onMotionMeasurement(motion(1.0, seconds(1) + 130_000_000L))
+        estimator.onMotionMeasurement(motion(1.0, seconds(1) + 130_000_000L))
+        val estimate = estimator.snapshotAt(seconds(1) + 130_000_000L)
 
         assertTrue(estimate.speedMetersPerSecond!! > 10.0)
     }
@@ -384,7 +485,8 @@ class SpeedEstimatorTest {
         estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1) + 10_000_000L, bearing = 0.0))
         estimator.onMotionMeasurement(motion(2.0, seconds(1) + 30_000_000L))
         estimator.onMotionMeasurement(motion(2.0, seconds(1) + 50_000_000L))
-        val estimate = estimator.onMotionMeasurement(motion(2.0, seconds(1) + 70_000_000L))
+        estimator.onMotionMeasurement(motion(2.0, seconds(1) + 70_000_000L))
+        val estimate = estimator.snapshotAt(seconds(1) + 70_000_000L)
 
         assertEquals(10.0, estimate.speedMetersPerSecond!!, 0.0001)
     }
@@ -395,7 +497,8 @@ class SpeedEstimatorTest {
         estimator.onMotionMeasurement(motion(0.0, seconds(1) + 20_000_000L, upAcceleration = 5.0))
         estimator.onMotionMeasurement(motion(0.0, seconds(1) + 40_000_000L))
         estimator.onMotionMeasurement(motion(0.0, seconds(1) + 60_000_000L))
-        val estimate = estimator.onMotionMeasurement(motion(0.0, seconds(1) + 80_000_000L))
+        estimator.onMotionMeasurement(motion(0.0, seconds(1) + 80_000_000L))
+        val estimate = estimator.snapshotAt(seconds(1) + 80_000_000L)
 
         assertEquals(10.0, estimate.speedMetersPerSecond!!, 0.01)
     }
@@ -473,6 +576,30 @@ class SpeedEstimatorTest {
 
         assertEquals(before.speedMetersPerSecond!!, after.speedMetersPerSecond!!, 0.0)
         assertEquals(before.uncertaintyMetersPerSecond, after.uncertaintyMetersPerSecond, 0.0)
+    }
+
+    @Test
+    fun `history compaction preserves fixed mode results over a long sensor stream`() {
+        val estimator = fixedEstimatorWithSeed()
+        for (step in 1..1_000) {
+            val timestamp = seconds(1) + step * 20_000_000L
+            estimator.ingestMotionMeasurement(motion(0.0, timestamp))
+            if (step % 50 == 0) {
+                estimator.ingestGnssMeasurement(gnss(10.0, 0.1, timestamp, bearing = 0.0))
+            }
+        }
+        val beforeOldDuplicate = estimator.snapshotAt(seconds(21))
+
+        estimator.ingestMotionMeasurement(motion(8.0, seconds(2)))
+        val afterOldDuplicate = estimator.snapshotAt(seconds(21))
+
+        assertEquals(10.0, beforeOldDuplicate.speedMetersPerSecond!!, 0.05)
+        assertEquals(beforeOldDuplicate.speedMetersPerSecond, afterOldDuplicate.speedMetersPerSecond)
+        assertEquals(
+            beforeOldDuplicate.uncertaintyMetersPerSecond,
+            afterOldDuplicate.uncertaintyMetersPerSecond,
+            0.0
+        )
     }
 
     @Test

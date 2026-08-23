@@ -2,45 +2,47 @@ package com.mightykatun.speedometer.app.domain
 
 import com.mightykatun.speedometer.app.domain.model.SessionConfig
 import com.mightykatun.speedometer.app.domain.model.SessionStatistics
+import com.mightykatun.speedometer.app.domain.model.MaximumCandidate
+import com.mightykatun.speedometer.app.domain.model.MaximumCandidateChange
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import com.mightykatun.speedometer.app.domain.util.SpeedConverter
+import java.util.TreeMap
 import kotlin.math.max
 
 class SessionStatisticsTracker(
     private val config: SessionConfig,
-    private val timeProvider: TimeProvider
+    private val clock: MonotonicClock
 ) {
     private var sessionStartTimestampNanos: Long = 0L
-    private var maxSpeedKmh: Float = 0f
+    private var maximumWarmupStartTimestampNanos: Long = 0L
+    private var committedMaxSpeedMetersPerSecond: Double = 0.0
+    private val activeCandidates = HashMap<Long, MaximumCandidate>()
+    private val eligibleSpeedCounts = TreeMap<Double, Int>()
     private var maxSatellites: Int = 0
     private var currentSatellites: Int = 0
-    private var lastMaximumCandidateTimestampNanos: Long = 0L
     
     fun startSession() {
-        sessionStartTimestampNanos = timeProvider.currentTimeMillis() * NANOS_PER_MILLISECOND
-        maxSpeedKmh = 0f
+        sessionStartTimestampNanos = clock.elapsedRealtimeMillis() * NANOS_PER_MILLISECOND
+        maximumWarmupStartTimestampNanos = 0L
+        committedMaxSpeedMetersPerSecond = 0.0
+        activeCandidates.clear()
+        eligibleSpeedCounts.clear()
         maxSatellites = 0
         currentSatellites = 0
-        lastMaximumCandidateTimestampNanos = 0L
     }
 
     fun updateSpeed(estimate: SpeedEstimate): SessionStatistics {
         val currentSpeedKmh = estimate.speedMetersPerSecond
             ?.let { SpeedConverter.metersPerSecondToKmh(it.toFloat()) }
-        val maximumCandidateKmh = estimate.maximumCandidateMetersPerSecond
-            ?.let { SpeedConverter.metersPerSecondToKmh(it.toFloat()) }
-        val isNewMaximumCandidate = maximumCandidateKmh != null &&
-            estimate.maximumCandidateTimestampNanos != lastMaximumCandidateTimestampNanos
-        if (isNewMaximumCandidate) {
-            lastMaximumCandidateTimestampNanos = estimate.maximumCandidateTimestampNanos
+        val newWarmupStart = estimate.maximumWarmupStartTimestampNanos
+            .takeIf { it > 0L }
+            ?.coerceAtLeast(sessionStartTimestampNanos)
+            ?: 0L
+        if (newWarmupStart != maximumWarmupStartTimestampNanos) {
+            maximumWarmupStartTimestampNanos = newWarmupStart
+            rebuildEligibleSpeeds()
         }
-        if (isNewMaximumCandidate && estimate.trustedForMaximum &&
-            estimate.maximumCandidateTimestampNanos - sessionStartTimestampNanos >=
-            config.warmupPeriodMillis * NANOS_PER_MILLISECOND &&
-            estimate.maximumCandidateSatelliteCount >= config.minSatellitesForTracking
-        ) {
-            maxSpeedKmh = max(maxSpeedKmh, requireNotNull(maximumCandidateKmh))
-        }
+        estimate.maximumCandidateChanges.forEach(::applyCandidateChange)
 
         return snapshot(currentSpeedKmh)
     }
@@ -53,15 +55,71 @@ class SessionStatisticsTracker(
     
     fun reset() {
         sessionStartTimestampNanos = 0L
-        maxSpeedKmh = 0f
+        maximumWarmupStartTimestampNanos = 0L
+        committedMaxSpeedMetersPerSecond = 0.0
+        activeCandidates.clear()
+        eligibleSpeedCounts.clear()
         maxSatellites = 0
         currentSatellites = 0
-        lastMaximumCandidateTimestampNanos = 0L
+    }
+
+    private fun applyCandidateChange(change: MaximumCandidateChange) {
+        removeActiveCandidate(change.id)
+        when (change) {
+            is MaximumCandidateChange.Upsert -> addActiveCandidate(change.candidate)
+            is MaximumCandidateChange.Retract -> Unit
+            is MaximumCandidateChange.Finalize -> change.candidate?.let { candidate ->
+                if (isEligible(candidate)) {
+                    committedMaxSpeedMetersPerSecond = max(
+                        committedMaxSpeedMetersPerSecond,
+                        candidate.speedMetersPerSecond
+                    )
+                }
+            }
+        }
+    }
+
+    private fun addActiveCandidate(candidate: MaximumCandidate) {
+        activeCandidates[candidate.id] = candidate
+        if (isEligible(candidate)) incrementSpeed(candidate.speedMetersPerSecond)
+    }
+
+    private fun removeActiveCandidate(id: Long) {
+        val candidate = activeCandidates.remove(id) ?: return
+        if (!isEligible(candidate)) return
+        val count = eligibleSpeedCounts[candidate.speedMetersPerSecond] ?: return
+        if (count == 1) eligibleSpeedCounts.remove(candidate.speedMetersPerSecond)
+        else eligibleSpeedCounts[candidate.speedMetersPerSecond] = count - 1
+    }
+
+    private fun rebuildEligibleSpeeds() {
+        eligibleSpeedCounts.clear()
+        activeCandidates.values.filter(::isEligible).forEach { candidate ->
+            incrementSpeed(candidate.speedMetersPerSecond)
+        }
+    }
+
+    private fun incrementSpeed(speedMetersPerSecond: Double) {
+        eligibleSpeedCounts[speedMetersPerSecond] =
+            (eligibleSpeedCounts[speedMetersPerSecond] ?: 0) + 1
+    }
+
+    private fun isEligible(candidate: MaximumCandidate): Boolean =
+        maximumWarmupStartTimestampNanos > 0L &&
+            candidate.timestampNanos - maximumWarmupStartTimestampNanos >=
+            config.warmupPeriodMillis * NANOS_PER_MILLISECOND &&
+            candidate.satelliteCount >= config.minSatellitesForTracking
+
+    private fun maximumSpeedKmh(): Float {
+        val activeMaximum = if (eligibleSpeedCounts.isEmpty()) 0.0 else eligibleSpeedCounts.lastKey()
+        return SpeedConverter.metersPerSecondToKmh(
+            max(committedMaxSpeedMetersPerSecond, activeMaximum).toFloat()
+        )
     }
 
     private fun snapshot(currentSpeedKmh: Float?) = SessionStatistics(
         currentSpeedKmh = currentSpeedKmh,
-        maxSpeedKmh = maxSpeedKmh,
+        maxSpeedKmh = maximumSpeedKmh(),
         currentSatellites = currentSatellites,
         maxSatellites = maxSatellites
     )

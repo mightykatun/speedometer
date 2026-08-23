@@ -13,11 +13,16 @@ class SpeedometerViewModel(
 ) : ViewModel() {
 
     private var lastAccuracyUpdateNanos = Long.MIN_VALUE
+    private var sessionActive = false
+    private var gpsErrorActive = false
 
     var state by mutableStateOf(SpeedometerState())
         private set
 
     var errorMessage by mutableStateOf<String?>(null)
+        private set
+
+    var warningMessage by mutableStateOf<String?>(null)
         private set
 
     fun onSpeedEstimateReceived(estimate: SpeedEstimate) {
@@ -51,22 +56,40 @@ class SpeedometerViewModel(
     }
 
     fun onSessionStart() {
+        if (sessionActive) return
+        sessionActive = true
         sessionTracker.startSession()
     }
 
     fun onSessionReset() {
+        sessionActive = false
         sessionTracker.reset()
         lastAccuracyUpdateNanos = Long.MIN_VALUE
         state = SpeedometerState()
         errorMessage = null
+        warningMessage = null
+        gpsErrorActive = false
     }
 
     fun onError(message: String) {
+        gpsErrorActive = false
         errorMessage = message
     }
 
+    fun onGpsError(message: String) {
+        gpsErrorActive = true
+        errorMessage = message
+    }
+
+    fun onWarning(message: String?) {
+        warningMessage = message
+    }
+
     fun onGpsAvailable() {
-        errorMessage = null
+        if (gpsErrorActive) {
+            gpsErrorActive = false
+            errorMessage = null
+        }
     }
 
     private companion object {

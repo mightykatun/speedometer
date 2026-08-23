@@ -14,8 +14,8 @@ android {
         applicationId = "com.mightykatun.speedometer.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 6
-        versionName = "1.3.0"
+        versionCode = 7
+        versionName = "1.3.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -48,10 +48,7 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
             // Apply the signing config defined above
             if (keystorePropertiesFile.exists()) {
                 signingConfig = signingConfigs.getByName("release")
@@ -99,4 +96,44 @@ dependencies {
     testImplementation("org.mockito:mockito-core:5.8.0")
     testImplementation("org.mockito.kotlin:mockito-kotlin:5.2.1")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
+    androidTestImplementation(platform("androidx.compose:compose-bom:2023.08.00"))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
+}
+
+tasks.register("stageReleaseSbomInputs") {
+    dependsOn("assembleRelease")
+    val outputDirectory = layout.buildDirectory.dir("sbom-inputs")
+    outputs.dir(outputDirectory)
+    doLast {
+        val output = outputDirectory.get().asFile
+        output.deleteRecursively()
+        output.mkdirs()
+        configurations.getByName("releaseRuntimeClasspath")
+            .resolvedConfiguration
+            .resolvedArtifacts
+            .forEach { artifact ->
+                val id = artifact.moduleVersion.id
+                val artifactDirectory = output.resolve("${id.group}/${id.name}/${id.version}")
+                artifactDirectory.mkdirs()
+                copy {
+                    from(artifact.file)
+                    into(output.resolve("resolved-artifacts/${id.group}/${id.name}/${id.version}"))
+                }
+                artifactDirectory.resolve("pom.xml").writeText(
+                    """<?xml version="1.0" encoding="UTF-8"?>
+                    <project xmlns="http://maven.apache.org/POM/4.0.0">
+                      <modelVersion>4.0.0</modelVersion>
+                      <groupId>${id.group}</groupId>
+                      <artifactId>${id.name}</artifactId>
+                      <version>${id.version}</version>
+                    </project>
+                    """.trimIndent()
+                )
+            }
+        copy {
+            from(layout.buildDirectory.file("outputs/apk/release/app-release-unsigned.apk"))
+            into(output.resolve("application"))
+        }
+    }
 }

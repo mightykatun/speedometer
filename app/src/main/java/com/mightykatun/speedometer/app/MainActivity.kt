@@ -3,10 +3,13 @@ package com.mightykatun.speedometer.app
 import android.Manifest
 import android.app.PictureInPictureParams
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.util.Rational
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -26,13 +29,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 
-import com.mightykatun.speedometer.app.data.repository.SpeedRepositoryImpl
 import com.mightykatun.speedometer.app.di.SpeedometerViewModelFactory
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
 import com.mightykatun.speedometer.app.domain.model.SpeedUnit
@@ -43,60 +47,69 @@ import java.util.Locale
 class MainActivity : ComponentActivity() {
 
     private val viewModel: SpeedometerViewModel by viewModels { SpeedometerViewModelFactory.INSTANCE }
-    
-    private lateinit var speedRepository: SpeedRepositoryImpl
+    private val repositoryViewModel: SpeedRepositoryViewModel by viewModels()
+    private val speedRepository get() = repositoryViewModel.repository
 
     private var isInPipMode by mutableStateOf(false)
     private var speedUnit by mutableStateOf(SpeedUnit.KILOMETERS_PER_HOUR)
     private var trackingMode by mutableStateOf(TrackingMode.HANDHELD)
+    private var preferredTrackingMode = TrackingMode.HANDHELD
+    private var permissionIssue by mutableStateOf<LocationPermissionIssue?>(null)
+    private var permissionRequestInFlight = false
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
+        permissionRequestInFlight = false
         val fineLocation = permissions[Manifest.permission.ACCESS_FINE_LOCATION] ?: false
         val coarseLocation = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] ?: false
 
         if (fineLocation) {
+            permissionIssue = null
             startSpeedTracking()
         } else {
-            viewModel.onError(if (coarseLocation) {
-                "Precise Location required for GPS speed accuracy.\nPlease allow 'Precise' in settings."
+            permissionIssue = if (coarseLocation) {
+                LocationPermissionIssue.PRECISE_REQUIRED
             } else {
-                "Location permission denied.\nApp requires GPS access to function."
-            })
+                LocationPermissionIssue.DENIED
+            }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        speedRepository = SpeedRepositoryImpl(this)
         val preferences = getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
         speedUnit = SpeedUnit.fromPreference(preferences.getString(SPEED_UNIT_KEY, null))
-        trackingMode = TrackingMode.fromPreference(preferences.getString(TRACKING_MODE_KEY, null))
+        preferredTrackingMode = TrackingMode.fromPreference(preferences.getString(TRACKING_MODE_KEY, null))
             .takeIf { it != TrackingMode.FIXED || speedRepository.supportsFixedMode }
             ?: TrackingMode.HANDHELD
+        trackingMode = TrackingMode.HANDHELD
         
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) 
             != PackageManager.PERMISSION_GRANTED) {
-            requestPermissionLauncher.launch(
-                arrayOf(
-                    Manifest.permission.ACCESS_FINE_LOCATION,
-                    Manifest.permission.ACCESS_COARSE_LOCATION
-                )
-            )
+            if (preferences.getBoolean(LOCATION_PERMISSION_REQUESTED_KEY, false)) {
+                permissionIssue = currentPermissionIssue()
+            } else {
+                requestLocationPermission()
+            }
         }
 
         setContent {
             SpeedometerScreen(
                 state = viewModel.state,
                 error = viewModel.errorMessage,
+                warning = viewModel.warningMessage,
                 isInPipMode = isInPipMode,
                 speedUnit = speedUnit,
                 trackingMode = trackingMode,
                 supportsFixedMode = speedRepository.supportsFixedMode,
+                supportsPip = supportsPictureInPicture(),
+                permissionMessage = permissionIssue?.message,
                 onSpeedUnitClick = { cycleSpeedUnit() },
                 onTrackingModeChange = { changeTrackingMode(it) },
-                onEnterPip = { enterPipMode() }
+                onEnterPip = { enterPipMode() },
+                onRequestPermission = { requestLocationPermission() },
+                onOpenSettings = { openAppSettings() }
             )
         }
     }
@@ -109,11 +122,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun enterPipMode() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && supportsPictureInPicture()) {
             val params = PictureInPictureParams.Builder()
                 .setAspectRatio(Rational(16, 9))
                 .build()
-            enterPictureInPictureMode(params)
+            runCatching { enterPictureInPictureMode(params) }
+                .onSuccess { entered ->
+                    if (!entered) viewModel.onWarning("Unable to enter floating mode")
+                }
+                .onFailure { viewModel.onWarning("Unable to enter floating mode") }
         }
     }
 
@@ -126,16 +143,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun changeTrackingMode(useFixedMode: Boolean) {
-        trackingMode = if (useFixedMode && speedRepository.supportsFixedMode) {
+        preferredTrackingMode = if (useFixedMode && speedRepository.supportsFixedMode) {
             TrackingMode.FIXED
         } else {
             TrackingMode.HANDHELD
         }
         getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
             .edit()
-            .putString(TRACKING_MODE_KEY, trackingMode.preferenceValue)
+            .putString(TRACKING_MODE_KEY, preferredTrackingMode.preferenceValue)
             .apply()
-        speedRepository.setTrackingMode(trackingMode)
+        speedRepository.setTrackingMode(preferredTrackingMode)
     }
 
     override fun onStart() {
@@ -146,53 +163,111 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
-        speedRepository.stopUpdates()
-
         if (!isChangingConfigurations) {
+            speedRepository.stopUpdates()
             viewModel.onSessionReset()
         }
-    }
-
-    override fun onDestroy() {
-        speedRepository.close()
-        super.onDestroy()
     }
 
     private fun checkPermissionsAndStart() {
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
             == PackageManager.PERMISSION_GRANTED) {
+            permissionIssue = null
             startSpeedTracking()
+        } else if (!permissionRequestInFlight) {
+            permissionIssue = currentPermissionIssue()
         }
     }
 
     private fun startSpeedTracking() {
         speedRepository.startUpdates(
-            trackingMode = trackingMode,
+            trackingMode = preferredTrackingMode,
             onEstimate = viewModel::onSpeedEstimateReceived,
             onSatelliteCount = viewModel::onSatelliteCountReceived,
             onGnssAvailable = viewModel::onGpsAvailable,
-            onError = viewModel::onError
+            onPermissionRequired = {
+                permissionIssue = currentPermissionIssue()
+            },
+            onError = viewModel::onGpsError,
+            onTrackingModeChanged = { effectiveMode ->
+                trackingMode = effectiveMode
+                viewModel.onWarning(
+                    if (preferredTrackingMode == TrackingMode.FIXED &&
+                        effectiveMode == TrackingMode.HANDHELD
+                    ) {
+                        "Motion sensors unavailable; using GNSS only"
+                    } else null
+                )
+            }
         )
     }
+
+    private fun requestLocationPermission() {
+        if (permissionRequestInFlight) return
+        getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(LOCATION_PERMISSION_REQUESTED_KEY, true)
+            .apply()
+        permissionRequestInFlight = true
+        requestPermissionLauncher.launch(
+            arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            )
+        )
+    }
+
+    private fun openAppSettings() {
+        startActivity(
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.fromParts("package", packageName, null)
+            )
+        )
+    }
+
+    private fun supportsPictureInPicture(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+    private fun currentPermissionIssue(): LocationPermissionIssue =
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            LocationPermissionIssue.PRECISE_REQUIRED
+        } else {
+            LocationPermissionIssue.DENIED
+        }
 
     private companion object {
         const val PREFERENCES_NAME = "speedometer_preferences"
         const val SPEED_UNIT_KEY = "speed_unit"
         const val TRACKING_MODE_KEY = "tracking_mode"
+        const val LOCATION_PERMISSION_REQUESTED_KEY = "location_permission_requested"
     }
+}
+
+private enum class LocationPermissionIssue(val message: String) {
+    DENIED("Location permission is required to measure speed."),
+    PRECISE_REQUIRED("Precise location must be enabled for GPS speed accuracy.")
 }
 
 @Composable
 fun SpeedometerScreen(
     state: SpeedometerState,
     error: String?,
+    warning: String?,
     isInPipMode: Boolean,
     speedUnit: SpeedUnit,
     trackingMode: TrackingMode,
     supportsFixedMode: Boolean,
+    supportsPip: Boolean,
+    permissionMessage: String?,
     onSpeedUnitClick: () -> Unit,
     onTrackingModeChange: (Boolean) -> Unit,
-    onEnterPip: () -> Unit
+    onEnterPip: () -> Unit,
+    onRequestPermission: () -> Unit,
+    onOpenSettings: () -> Unit
 ) {
     val isDark = isSystemInDarkTheme()
     val backgroundColor = if (isDark) Color.Black else Color.White
@@ -220,7 +295,14 @@ fun SpeedometerScreen(
             .background(backgroundColor)
             .padding(16.dp)
     ) {
-        if (error != null) {
+        if (permissionMessage != null) {
+            PermissionRecovery(
+                message = permissionMessage,
+                onRequestPermission = onRequestPermission,
+                onOpenSettings = onOpenSettings,
+                modifier = Modifier.align(Alignment.Center)
+            )
+        } else if (error != null) {
             Text(
                 text = error,
                 color = Color.Red,
@@ -229,6 +311,17 @@ fun SpeedometerScreen(
                 modifier = Modifier.align(Alignment.Center)
             )
         } else {
+            if (warning != null && !isInPipMode) {
+                Text(
+                    text = warning,
+                    color = Color(0xFFFFA000),
+                    textAlign = TextAlign.Center,
+                    fontSize = 13.sp,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 52.dp)
+                )
+            }
             if (!isInPipMode) {
                 Row(
                     modifier = Modifier
@@ -272,7 +365,8 @@ fun SpeedometerScreen(
                                 enabled = supportsFixedMode,
                                 role = Role.Switch,
                                 onValueChange = onTrackingModeChange
-                            ),
+                            )
+                            .semantics { contentDescription = "Tracking mode" },
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
@@ -375,7 +469,7 @@ fun SpeedometerScreen(
                 }
                 
                 // --- BOTTOM RIGHT: PiP Button ---
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (supportsPip) {
                     Button(
                         onClick = onEnterPip,
                         modifier = Modifier
@@ -386,6 +480,33 @@ fun SpeedometerScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun PermissionRecovery(
+    message: String,
+    onRequestPermission: () -> Unit,
+    onOpenSettings: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(
+            text = message,
+            color = MaterialTheme.colorScheme.error,
+            textAlign = TextAlign.Center,
+            fontSize = 20.sp
+        )
+        Button(onClick = onRequestPermission) {
+            Text("grant location")
+        }
+        Button(onClick = onOpenSettings) {
+            Text("open settings")
         }
     }
 }

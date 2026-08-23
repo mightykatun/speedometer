@@ -49,7 +49,7 @@ make release
 # Build debug APK
 make debug
 
-# Build release and install via ADB
+# Build debug and install via ADB
 make install
 
 # Clean build artifacts
@@ -63,7 +63,7 @@ make help
 ```
 
 ### APK Locations
-- **Release**: `app/build/outputs/apk/release/app-release.apk`
+- **Release**: `app/build/outputs/apk/release/app-release.apk` when locally signed, otherwise `app-release-unsigned.apk`
 - **Debug**: `app/build/outputs/apk/debug/app-debug.apk`
 
 ## Code Style Guidelines
@@ -108,16 +108,13 @@ import kotlinx.coroutines.launch
 try {
     locationManager.requestLocationUpdates(...)
 } catch (e: Exception) {
-    viewModel.errorMessage = "Error starting GPS: ${e.message}"
+    viewModel.onGpsError("Error starting GPS: ${e.message}")
 }
 ```
 
 ### Architecture Patterns
-- **Clean Architecture**:
-    - **Domain Layer**: Pure Kotlin business logic, models, and interfaces (no Android dependencies).
-    - **Data Layer**: Repository implementations and data sources.
-    - **Presentation Layer**: UI (Compose) and ViewModel.
-- **MVVM**: MainActivity handles UI/lifecycle, ViewModel manages state/logic via Domain use cases.
+- **Layered architecture**: Domain estimator/statistics code is pure Kotlin; Android clock and sensor/location adapters sit at platform boundaries; Compose and the ViewModel form the presentation layer.
+- **MVVM**: MainActivity handles UI/lifecycle and the ViewModel manages presentation state and session statistics.
 - **Lifecycle-aware**: Use `lifecycleScope.launch` for coroutines.
 - **Compose**: Use `@Composable` functions for UI components.
 - **Separation**: Private functions for internal logic, public for external interactions.
@@ -127,37 +124,44 @@ try {
 ```
 app/src/main/java/com/mightykatun/speedometer/app/
 ├── MainActivity.kt                    # Activity and UI composition
+├── SpeedRepositoryViewModel.kt        # Configuration-stable repository owner
 ├── SpeedometerViewModel.kt            # State management and UI logic
-├── domain/                          # Business logic (pure Kotlin)
+├── domain/                          # Business logic and clock contract
 │   ├── model/                         # Data models
 │   │   ├── GnssMeasurement.kt
+│   │   ├── EstimateQuality.kt
+│   │   ├── MaximumCandidate.kt
 │   │   ├── MotionMeasurement.kt
 │   │   ├── SpeedEstimate.kt
 │   │   ├── SpeedEstimatorConfig.kt
 │   │   ├── TrackingMode.kt
 │   │   ├── SpeedometerState.kt
+│   │   ├── SpeedUnit.kt
 │   │   ├── SessionConfig.kt
 │   │   └── SessionStatistics.kt
 │   ├── util/                          # Utilities
 │   │   └── SpeedConverter.kt
 │   ├── SpeedEstimator.kt             # Confidence-aware GNSS/IMU fusion
 │   ├── SessionStatisticsTracker.kt      # Session tracking logic
-│   └── TimeProvider.kt                # Time abstraction
+│   ├── MonotonicClock.kt              # Monotonic time abstraction
+│   └── time/
+│       └── AndroidElapsedRealtimeClock.kt # Android clock implementation
 ├── data/                           # Data layer
-│   ├── ProductionTimeProvider.kt         # Time implementation
 │   └── repository/                     # Repository pattern
+│       ├── RepositoryPlatform.kt          # Injectable Android platform boundaries
 │       ├── SpeedRepository.kt             # Speed update contract
 │       └── SpeedRepositoryImpl.kt         # Serialized GNSS/sensor acquisition
 ├── di/                             # Dependency injection
 │   └── SpeedometerViewModelFactory.kt    # ViewModel factory
-└── AndroidManifest.xml               # App configuration and permissions
 ```
+
+The manifest is at `app/src/main/AndroidManifest.xml`.
 
 ## Key Dependencies & Versions
 
-- **Android Gradle Plugin**: 8.2.0
-- **Kotlin**: 1.9.0
-- **Compose Compiler**: 1.5.1
+- **Android Gradle Plugin**: 8.13.2
+- **Kotlin**: 1.9.24
+- **Compose Compiler**: 1.5.14
 - **Compose BOM**: 2023.08.00
 - **Target SDK**: 35, **Min SDK**: 24
 
@@ -204,7 +208,7 @@ If `keystore.properties` doesn't exist, release builds will run unsigned for deb
 ## Special Considerations
 
 - **Privacy-focused**: No internet permissions or tracking libraries
-- **Battery-conscious**: GPS hardware disconnected when app loses focus
+- **Battery-conscious**: GPS and motion listeners are disconnected when the Activity stops outside configuration recreation
 - **Session-based**: All data resets when app goes to background
 - **Real-time**: Uses one HandlerThread for ordered GNSS and motion processing
 - **Accuracy-aware**: GNSS speed remains authoritative; IMU prediction is bounded to short gaps

@@ -1,7 +1,7 @@
 package com.mightykatun.speedometer.app
 
 import com.mightykatun.speedometer.app.domain.SessionStatisticsTracker
-import com.mightykatun.speedometer.app.domain.TimeProvider
+import com.mightykatun.speedometer.app.domain.MonotonicClock
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
 import com.mightykatun.speedometer.app.domain.model.SessionConfig
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
@@ -12,14 +12,14 @@ import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 
 class SpeedometerViewModelTest {
-    private val timeProvider = mock<TimeProvider>()
+    private val clock = mock<MonotonicClock>()
     private val viewModel = SpeedometerViewModel(
-        SessionStatisticsTracker(SessionConfig(), timeProvider)
+        SessionStatisticsTracker(SessionConfig(), clock)
     )
 
     @Test
     fun `low speed estimate remains visible`() {
-        whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 1000L)
+        whenever(clock.elapsedRealtimeMillis()).thenReturn(0L, 1000L)
         viewModel.onSessionStart()
 
         viewModel.onSpeedEstimateReceived(estimate(0.1, EstimateQuality.TRACKING))
@@ -29,7 +29,7 @@ class SpeedometerViewModelTest {
 
     @Test
     fun `unavailable estimate is not represented as zero`() {
-        whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 1000L)
+        whenever(clock.elapsedRealtimeMillis()).thenReturn(0L, 1000L)
         viewModel.onSessionStart()
 
         viewModel.onSpeedEstimateReceived(estimate(null, EstimateQuality.UNAVAILABLE))
@@ -40,9 +40,9 @@ class SpeedometerViewModelTest {
 
     @Test
     fun `generic estimator ticks do not clear GPS errors`() {
-        whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 1000L)
+        whenever(clock.elapsedRealtimeMillis()).thenReturn(0L, 1000L)
         viewModel.onSessionStart()
-        viewModel.onError("gps provider disabled")
+        viewModel.onGpsError("gps provider disabled")
 
         viewModel.onSpeedEstimateReceived(estimate(null, EstimateQuality.ACQUIRING))
 
@@ -53,7 +53,7 @@ class SpeedometerViewModelTest {
 
     @Test
     fun `uncertainty display updates at most once per second`() {
-        whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 1000L, 1100L, 2000L)
+        whenever(clock.elapsedRealtimeMillis()).thenReturn(0L, 1000L, 1100L, 2000L)
         viewModel.onSessionStart()
 
         viewModel.onSpeedEstimateReceived(estimate(5.0, EstimateQuality.TRACKING, 0.2, 1_000_000_000L))
@@ -66,7 +66,7 @@ class SpeedometerViewModelTest {
 
     @Test
     fun `first finite uncertainty is shown immediately after acquiring`() {
-        whenever(timeProvider.currentTimeMillis()).thenReturn(0L, 1000L, 1100L)
+        whenever(clock.elapsedRealtimeMillis()).thenReturn(0L, 1000L, 1100L)
         viewModel.onSessionStart()
         viewModel.onSpeedEstimateReceived(
             estimate(null, EstimateQuality.ACQUIRING, Double.POSITIVE_INFINITY, 1_000_000_000L)
@@ -75,6 +75,19 @@ class SpeedometerViewModelTest {
         viewModel.onSpeedEstimateReceived(estimate(5.0, EstimateQuality.TRACKING, 0.2, 1_100_000_000L))
 
         assertEquals(0.72f, viewModel.state.speedAccuracyKmh!!, 0.001f)
+    }
+
+    @Test
+    fun `repeated session start does not reset retained state`() {
+        whenever(clock.elapsedRealtimeMillis()).thenReturn(0L)
+        viewModel.onSessionStart()
+        viewModel.onSpeedEstimateReceived(
+            estimate(5.0, EstimateQuality.TRACKING, timestampNanos = 1_000_000_000L)
+        )
+
+        viewModel.onSessionStart()
+
+        assertEquals(18f, viewModel.state.currentSpeedKmh!!, 0.001f)
     }
 
     private fun estimate(
@@ -86,10 +99,6 @@ class SpeedometerViewModelTest {
         speedMetersPerSecond = speed,
         uncertaintyMetersPerSecond = uncertainty,
         quality = quality,
-        trustedForMaximum = quality == EstimateQuality.TRACKING,
-        timestampNanos = timestampNanos,
-        maximumCandidateMetersPerSecond = speed.takeIf { quality == EstimateQuality.TRACKING },
-        maximumCandidateTimestampNanos = timestampNanos,
-        maximumCandidateSatelliteCount = 3
+        timestampNanos = timestampNanos
     )
 }
