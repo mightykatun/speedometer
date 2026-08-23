@@ -7,7 +7,7 @@ enum class SpeedUnit(
 ) {
     KILOMETERS_PER_HOUR("km/h", "kmh", 1f),
     MILES_PER_HOUR("mph", "mph", 0.6213712f),
-    KNOTS("kn", "knots", 0.5399568f),
+    KNOTS("kts", "knots", 0.5399568f),
     METERS_PER_SECOND("m/s", "mps", 1f / 3.6f);
 
     fun fromKilometersPerHour(speedKmh: Float): Float =

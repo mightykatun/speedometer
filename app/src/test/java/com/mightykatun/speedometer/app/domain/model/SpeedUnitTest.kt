@@ -32,4 +32,9 @@ class SpeedUnitTest {
         assertEquals(SpeedUnit.KILOMETERS_PER_HOUR, SpeedUnit.fromPreference(null))
         assertEquals(SpeedUnit.KILOMETERS_PER_HOUR, SpeedUnit.fromPreference("unsupported"))
     }
+
+    @Test
+    fun `uses the standard knots abbreviation`() {
+        assertEquals("kts", SpeedUnit.KNOTS.label)
+    }
 }
