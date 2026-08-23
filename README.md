@@ -13,17 +13,17 @@ Download and install the APK from [Releases](https://github.com/mightykatun/spee
 ## Features
 
 * **Accuracy-aware Speed:** GNSS speed is filtered by its reported uncertainty without hiding valid low-speed readings. The display shows its current uncertainty in km/h, mph, knots, or m/s.
-* **Tracking Modes:** `gnss` uses satellite speed only. `gnss+imu` adds bounded prediction for a rigidly mounted phone. `imu` is a location-free, zero-seeded relative estimate that must be entered or reset while stopped and will drift without an absolute speed source.
+* **Tracking Modes:** `gnss` uses satellite speed only. `gnss+imu` adds bounded prediction for a rigidly mounted phone.
 * **Speed Trend:** A minimal smoothed scrolling tail shows the most recent 30 seconds without axes or visual clutter.
-* **Satellite Status:** Real-time GNSS satellite count with a red/green status indicator; location-free `imu` uses a cyan zero-seeded indicator.
+* **Satellite Status:** Real-time GNSS satellite count with a red/green status indicator.
 * **Session Statistics:**
-    * **Top Speed:** Tracks trusted raw GNSS maxima; inertial prediction and `imu` never increase it.
+    * **Top Speed:** Tracks trusted raw GNSS maxima; inertial prediction never increases it.
     * **Top Satellites:** Tracks the maximum number of satellites used in a fix.
 * **Smart Logic:**
     * **2-Second Warmup:** Max speed tracking begins 2 seconds after GPS lock while retaining GNSS uncertainty, satellite, and outlier gates.
     * **Confidence Weighting:** Android's speed uncertainty controls how strongly each GNSS reading corrects the estimate.
     * **Short Dropout Bridging:** `gnss+imu` uses linear acceleration for no more than 3 seconds without trustworthy GNSS.
-    * **No Artificial Floor:** Slow movement remains visible. GNSS modes use zero only after strong stationary evidence; `imu` uses the explicit stopped zero seed.
+    * **No Artificial Floor:** Slow movement remains visible; zero is used only after strong stationary evidence.
     * **Honest Signal Loss:** Unreliable stale estimates become unavailable instead of snapping to zero.
 * **Privacy & Cleanliness:**
     * **No Ads:** Completely free and clean interface.
@@ -36,7 +36,6 @@ Download and install the APK from [Releases](https://github.com/mightykatun/spee
 
 * **Active Only:** Speed and stats are tracked only while the screen is on and the app is visible.
 * **Auto-Reset:** Minimizing the app, turning off the screen, or switching apps **immediately wipes** all session data (current speed, max speed, satellite counts).
-* **IMU Boundary:** Entering or leaving location-free `imu` restarts the measurement session because its zero seed is incompatible with GNSS-backed state.
 * **Battery Safe:** The app aggressively disconnects from the GPS hardware the moment it loses focus.
 
 ## Preview

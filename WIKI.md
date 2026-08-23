@@ -8,7 +8,7 @@
 - **Purpose:** Privacy-focused, accuracy-aware vehicle speed display
 - **Network access:** None
 
-The app uses Android GNSS speed as its absolute speed source. In `gnss+imu` mode, Android's linear-acceleration and rotation-vector sensors provide bounded short-term prediction between GNSS fixes. The separate `imu` mode is explicitly zero-seeded and relative: it assumes the phone is rigidly mounted with its top edge forward, starts at zero, and cannot correct inertial drift without an absolute source.
+The app uses Android GNSS speed as its absolute speed source. In `gnss+imu` mode, Android's linear-acceleration and rotation-vector sensors provide bounded short-term prediction between GNSS fixes. Inertial data never replaces GNSS indefinitely.
 
 ## Screen
 
@@ -16,15 +16,15 @@ The app remains a single-screen HUD with no navigation graph.
 
 ### Top Left
 
-- GNSS modes show the latest satellites reported as used-in-fix by Android's GNSS status callback
+- Shows the latest satellites reported as used-in-fix by Android's GNSS status callback
 - GNSS status is green at three or more satellites and red below three
-- `imu` instead shows a cyan zero-seeded status because no satellite callbacks are registered
+- Satellite count is status information, not a speed-accuracy measurement
 
 ### Top Right
 
-- Persisted text-only `gnss` / `gnss+imu` / `imu` selector matching the HUD labels
+- Persisted text-only `gnss` / `gnss+imu` selector matching the HUD labels
 - Defaults to `gnss`
-- Unavailable modes are skipped: `gnss+imu` requires linear acceleration and rotation vector; `imu` requires only linear acceleration
+- Disabled when the device lacks either linear acceleration or rotation-vector sensors
 - Hidden in Picture-in-Picture mode
 
 ### Center
@@ -42,7 +42,7 @@ Estimate states:
 | State | Indicator | Meaning |
 |---|---|---|
 | Tracking | Number available | Recent GNSS correction and bounded uncertainty |
-| Estimated | Number available | Number is available but uncertainty or fix age is elevated; all `imu` output uses this state |
+| Estimated | Number available | Number is available but uncertainty or fix age is elevated |
 | Acquiring | `--` | No valid GNSS speed seed or first IMU sample yet |
 | Speed unavailable | `--` | Last defensible estimate is too old or too uncertain |
 
@@ -51,7 +51,7 @@ Estimate states:
 - Top speed records accepted raw GNSS candidates after a two-second warmup, with at least three satellites and no estimator probation
 - Top satellites tracks the session maximum independently
 - A smoothed 30-second trend tail fades toward the left and ends at the current-speed point on the right
-- `reset` restarts acquisition and session statistics; in `imu`, it also asserts that current speed is zero
+- `reset` restarts acquisition and session statistics
 - Text-only `float` enters Picture-in-Picture on Android 8+
 
 ## Tracking Modes
@@ -74,10 +74,6 @@ Estimate states:
 8. Quarantines violent handling and falls back to GNSS-only whenever orientation, course, timestamp, or sensor quality is inadequate.
 
 `gnss+imu` does not promise tunnel navigation. Inertial propagation is limited to three seconds because consumer accelerometer bias creates rapidly growing velocity error.
-
-### IMU
-
-`imu` registers no location or GNSS callbacks and therefore does not require location permission. Entering the mode or pressing `reset` explicitly seeds speed at zero. The phone must be rigidly mounted with its top edge pointing forward. The mode integrates the linear-acceleration sensor's device Y axis, smooths it with the same robust acceleration filter, reports degraded quality after the first sample, grows uncertainty continuously, and becomes unavailable when uncertainty exceeds `10 m/s`. It ignores GNSS input and never contributes to trusted top speed. Quiet IMU data cannot prove absolute speed, so this mode is not valid if selected while already moving.
 
 ## Data Pipeline
 
@@ -157,7 +153,7 @@ There is no arbitrary minimum display speed. Valid values such as 0.1, 0.2, or 0
 
 Zero requires repeated, high-confidence GNSS readings of exactly zero over at least two seconds. Every accepted positive speed immediately exits stationarity, however small it is. `gnss+imu` additionally requires quiet longitudinal acceleration.
 
-GNSS-backed internal Gaussian state is not clipped; only its published result is constrained to the physically valid non-negative speed domain. Zero-seeded `imu` constrains its integrated state to non-negative speed because reverse vehicle direction is outside the one-dimensional model.
+The internal Gaussian state is not clipped. Only its published result is constrained to the physically valid non-negative speed domain.
 
 ### Signal Age
 
@@ -168,16 +164,14 @@ GNSS-backed internal Gaussian state is not clipped; only its published result is
 | Correction age up to 3 seconds | Estimated/degraded number |
 | Correction older than 3 seconds | Unavailable, `--` |
 | Strong stationary evidence | Valid `0.00` |
-| Zero-seeded IMU with uncertainty at or below 10 m/s | Estimated/degraded number |
 
 No watchdog injects fake zero readings.
 
 ## Session Behavior
 
-- GNSS acquisition starts in `onStart` after precise-location permission is available; `imu` starts sensors without location permission
+- Acquisition starts in `onStart` after precise-location permission is available
 - Acquisition and sensor listeners survive configuration recreation but stop when the app backgrounds
 - Session statistics reset when the app backgrounds
-- Entering or leaving location-free `imu` resets measurement state and session statistics
 - Display unit and tracking mode persist locally
 - No location, motion, or session history leaves the device
 
@@ -189,12 +183,10 @@ No watchdog injects fake zero readings.
 | GPS provider disabled | Display `gps provider disabled` |
 | Speed absent or invalid | Ignore the measurement; never synthesize zero |
 | Speed uncertainty too poor | Preserve the prior estimate until it becomes stale |
-| Linear-acceleration sensor absent | Disable `gnss+imu` and `imu` |
-| Rotation-vector sensor absent | Disable `gnss+imu`; keep device-axis `imu` available |
+| IMU sensors absent | Disable `gnss+imu` |
 | Orientation unreliable or stale in `gnss+imu` | Continue GNSS-only |
 | Course absent or stale in `gnss+imu` | Continue GNSS-only |
 | Gross phone movement in `gnss+imu` | Drop the course anchor, quarantine IMU prediction, and require a fresh course |
-| Gross phone movement in `imu` | Quarantine integration and reset its acceleration filter |
 | GNSS absent for more than 3 seconds | Mark speed unavailable |
 
 ## Architecture
@@ -231,7 +223,7 @@ app/src/main/java/com/mightykatun/speedometer/app/
     └── util/SpeedConverter.kt
 ```
 
-No third-party location or sensor-fusion package is used. Android's linear-acceleration sensor provides gravity-removed acceleration; `gnss+imu` also uses the rotation vector for world-frame projection, while `imu` deliberately uses the mounted device Y axis. The app-specific two-state estimator remains explicit and JVM-tested.
+No third-party location or sensor-fusion package is used. Android's composite sensors provide orientation and gravity removal; the app-specific two-state estimator remains explicit and JVM-tested.
 
 ## Verification
 
@@ -241,7 +233,7 @@ Automated gates:
 ./gradlew --no-build-cache clean test lint assembleDebug assembleRelease assembleDebugAndroidTest
 ```
 
-JVM tests cover repository lifecycle/retry/generation ordering, low-speed preservation, invalid measurements, uncertainty percentage bands, outliers, reacquisition probation, replay-aware maximum candidates, GNSS isolation, GNSS + IMU prediction, zero-seeded IMU behavior, trend smoothing and retention, spike/vertical-shock rejection, violent-motion quarantine, orientation freshness, sensor-rate invariance, course expiry, delayed replay, duplicate inputs, history compaction, stationary evidence, safe mode transitions, and stale-data unavailability. Compose instrumentation tests cover mode, unit, reset, float, and permission-recovery actions.
+JVM tests cover repository lifecycle/retry/generation ordering, low-speed preservation, invalid measurements, uncertainty percentage bands, outliers, reacquisition probation, replay-aware maximum candidates, GNSS isolation, GNSS + IMU prediction, trend retention, spike/vertical-shock rejection, violent-motion quarantine, orientation freshness, sensor-rate invariance, course expiry, delayed replay, duplicate inputs, history compaction, stationary evidence, safe mode transitions, and stale-data unavailability. Compose instrumentation tests cover mode, unit, reset, float, and permission-recovery actions.
 
 ## Field Validation
 

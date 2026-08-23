@@ -38,8 +38,7 @@ internal interface RepositoryLocationGateway {
 
 internal interface RepositoryMotionGateway {
     val supportsFixedMode: Boolean
-    val supportsImuOnly: Boolean
-    fun register(listener: SensorEventListener, includeRotation: Boolean): Boolean
+    fun register(listener: SensorEventListener): Boolean
     fun unregister(listener: SensorEventListener)
 }
 
@@ -136,10 +135,9 @@ private class AndroidRepositoryMotionGateway(
 
     override val supportsFixedMode: Boolean =
         linearAccelerationSensor != null && rotationVectorSensor != null
-    override val supportsImuOnly: Boolean = linearAccelerationSensor != null
 
-    override fun register(listener: SensorEventListener, includeRotation: Boolean): Boolean {
-        if (!supportsImuOnly || includeRotation && !supportsFixedMode) return false
+    override fun register(listener: SensorEventListener): Boolean {
+        if (!supportsFixedMode) return false
         var complete = false
         try {
             val accelerationRegistered = sensorManager.registerListener(
@@ -148,7 +146,7 @@ private class AndroidRepositoryMotionGateway(
                 SENSOR_PERIOD_MICROSECONDS,
                 workerHandler
             )
-            val rotationRegistered = !includeRotation || sensorManager.registerListener(
+            val rotationRegistered = sensorManager.registerListener(
                 listener,
                 requireNotNull(rotationVectorSensor),
                 SENSOR_PERIOD_MICROSECONDS,

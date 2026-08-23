@@ -2,8 +2,7 @@ package com.mightykatun.speedometer.app.domain.model
 
 enum class TrackingMode(val preferenceValue: String) {
     HANDHELD("handheld"),
-    FIXED("fixed"),
-    IMU_ONLY("imu_only");
+    FIXED("fixed");
 
     companion object {
         fun fromPreference(value: String?): TrackingMode =

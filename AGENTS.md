@@ -213,8 +213,8 @@ If `keystore.properties` doesn't exist, release builds will run unsigned for deb
 - **Battery-conscious**: GPS and motion listeners are disconnected when the Activity stops outside configuration recreation
 - **Session-based**: All data resets when app goes to background
 - **Real-time**: Uses one HandlerThread for ordered GNSS and motion processing
-- **Accuracy-aware**: GNSS is the absolute source in `gnss` and `gnss+imu`; zero-seeded `imu` is explicitly relative and uncertainty-bounded
-- **Mode-aware**: Handheld mode ignores motion sensors, fixed mode requires a rigid mount, and IMU-only requires a stopped reset with the phone's top edge forward
+- **Accuracy-aware**: GNSS remains the absolute source in both tracking modes
+- **Mode-aware**: Handheld mode ignores motion sensors and fixed mode requires a rigid mount
 
 ## Common Tasks
 

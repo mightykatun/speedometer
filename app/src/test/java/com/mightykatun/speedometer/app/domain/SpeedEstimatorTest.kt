@@ -630,88 +630,6 @@ class SpeedEstimatorTest {
     }
 
     @Test
-    fun `imu only starts at explicit zero without GNSS`() {
-        val estimator = SpeedEstimator()
-        estimator.reset(TrackingMode.IMU_ONLY)
-        estimator.ingestMotionMeasurement(motion(0.0, seconds(1), orientationReliable = false))
-
-        val estimate = estimator.snapshotAt(seconds(1))
-
-        assertEquals(0.0, estimate.speedMetersPerSecond!!, 0.0)
-        assertEquals(EstimateQuality.DEGRADED, estimate.quality)
-        assertTrue(estimate.maximumCandidateChanges.isEmpty())
-    }
-
-    @Test
-    fun `imu only waits for its first sensor sample`() {
-        val estimator = SpeedEstimator()
-        estimator.reset(TrackingMode.IMU_ONLY)
-
-        val estimate = estimator.snapshotAt(seconds(20))
-
-        assertNull(estimate.speedMetersPerSecond)
-        assertEquals(EstimateQuality.ACQUIRING, estimate.quality)
-    }
-
-    @Test
-    fun `imu only integrates forward acceleration after leaving zero`() {
-        val estimator = SpeedEstimator()
-        estimator.reset(TrackingMode.IMU_ONLY)
-        for (step in 1..8) {
-            estimator.ingestMotionMeasurement(motion(1.0, step * 100_000_000L))
-        }
-
-        val estimate = estimator.snapshotAt(800_000_000L)
-
-        assertTrue(estimate.speedMetersPerSecond!! > 0.2)
-        assertEquals(EstimateQuality.DEGRADED, estimate.quality)
-        assertTrue(estimate.maximumCandidateChanges.isEmpty())
-    }
-
-    @Test
-    fun `imu only device axis does not require reliable magnetic heading`() {
-        val estimator = SpeedEstimator()
-        estimator.reset(TrackingMode.IMU_ONLY)
-        for (step in 1..8) {
-            estimator.ingestMotionMeasurement(
-                motion(
-                    northAcceleration = -5.0,
-                    time = step * 100_000_000L,
-                    orientationReliable = false,
-                    deviceYAcceleration = 1.0
-                )
-            )
-        }
-
-        assertTrue(estimator.snapshotAt(800_000_000L).speedMetersPerSecond!! > 0.2)
-    }
-
-    @Test
-    fun `imu only becomes unavailable above its uncertainty limit`() {
-        val estimator = SpeedEstimator()
-        estimator.reset(TrackingMode.IMU_ONLY)
-        estimator.ingestMotionMeasurement(motion(0.0, seconds(1), orientationReliable = false))
-
-        val estimate = estimator.snapshotAt(seconds(200))
-
-        assertNull(estimate.speedMetersPerSecond)
-        assertEquals(EstimateQuality.UNAVAILABLE, estimate.quality)
-        assertTrue(estimate.uncertaintyMetersPerSecond > 10.0)
-    }
-
-    @Test
-    fun `imu only ignores GNSS speed`() {
-        val estimator = SpeedEstimator()
-        estimator.reset(TrackingMode.IMU_ONLY)
-        estimator.ingestMotionMeasurement(motion(0.0, 500_000_000L, orientationReliable = false))
-
-        val estimate = estimator.onGnssMeasurement(gnss(30.0, 0.1, seconds(1)))
-
-        assertEquals(0.0, estimate.speedMetersPerSecond!!, 0.0)
-        assertTrue(estimate.maximumCandidateChanges.isEmpty())
-    }
-
-    @Test
     fun `moderate GNSS uncertainty can update maximum`() {
         val estimator = SpeedEstimator()
 
@@ -750,8 +668,7 @@ class SpeedEstimatorTest {
         upAcceleration: Double = 0.0,
         yawRadians: Double = 0.0,
         orientationReliable: Boolean = true,
-        orientationTimestampNanos: Long = time,
-        deviceYAcceleration: Double = northAcceleration
+        orientationTimestampNanos: Long = time
     ) = MotionMeasurement(
         accelerationEastMetersPerSecondSquared = eastAcceleration,
         accelerationMagneticNorthMetersPerSecondSquared = northAcceleration,
@@ -761,8 +678,7 @@ class SpeedEstimatorTest {
         deviceRollRadians = 0.0,
         orientationReliable = orientationReliable,
         timestampNanos = time,
-        orientationTimestampNanos = orientationTimestampNanos,
-        accelerationDeviceYMetersPerSecondSquared = deviceYAcceleration
+        orientationTimestampNanos = orientationTimestampNanos
     )
 
     private fun seconds(value: Long): Long = value * 1_000_000_000L

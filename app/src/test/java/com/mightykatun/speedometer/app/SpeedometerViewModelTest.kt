@@ -89,7 +89,7 @@ class SpeedometerViewModelTest {
     }
 
     @Test
-    fun `speed trend is smoothed bounded and cleared with the session`() {
+    fun `speed trend retains raw updates within a bounded window and clears with the session`() {
         whenever(clock.elapsedRealtimeMillis()).thenReturn(0L)
         viewModel.onSessionStart()
         viewModel.onSpeedEstimateReceived(
@@ -102,7 +102,7 @@ class SpeedometerViewModelTest {
         val trend = viewModel.state.speedTrend
         assertEquals(2, trend.size)
         assertEquals(36f, trend.first().speedKmh!!, 0.001f)
-        assertTrue(trend.last().speedKmh!! in 36f..72f)
+        assertEquals(72f, trend.last().speedKmh!!, 0.001f)
 
         for (index in 101..1_750) {
             viewModel.onSpeedEstimateReceived(

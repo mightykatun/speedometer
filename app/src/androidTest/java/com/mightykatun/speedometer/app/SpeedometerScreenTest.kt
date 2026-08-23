@@ -35,7 +35,6 @@ class SpeedometerScreenTest {
                 speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
                 trackingMode = TrackingMode.HANDHELD,
                 supportsFixedMode = true,
-                supportsImuOnly = true,
                 supportsPip = true,
                 permissionMessage = null,
                 onSpeedUnitClick = { unitClicks++ },
@@ -43,8 +42,7 @@ class SpeedometerScreenTest {
                 onReset = { resetClicks++ },
                 onEnterPip = { pipClicks++ },
                 onRequestPermission = {},
-                onOpenSettings = {},
-                onUseImu = {}
+                onOpenSettings = {}
             )
         }
 
@@ -67,7 +65,6 @@ class SpeedometerScreenTest {
     fun permissionRecoveryExposesRetryAndSettingsActions() {
         var retryClicks = 0
         var settingsClicks = 0
-        var imuClicks = 0
 
         composeRule.setContent {
             SpeedometerScreen(
@@ -78,7 +75,6 @@ class SpeedometerScreenTest {
                 speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
                 trackingMode = TrackingMode.HANDHELD,
                 supportsFixedMode = true,
-                supportsImuOnly = true,
                 supportsPip = true,
                 permissionMessage = "Precise location is required",
                 onSpeedUnitClick = {},
@@ -86,21 +82,18 @@ class SpeedometerScreenTest {
                 onReset = {},
                 onEnterPip = {},
                 onRequestPermission = { retryClicks++ },
-                onOpenSettings = { settingsClicks++ },
-                onUseImu = { imuClicks++ }
+                onOpenSettings = { settingsClicks++ }
             )
         }
 
         composeRule.onNodeWithText("Precise location is required").assertIsDisplayed()
         composeRule.onNodeWithText("grant location").performClick()
         composeRule.onNodeWithText("open settings").performClick()
-        composeRule.onNodeWithText("use imu only").performClick()
         composeRule.onNodeWithText("float").assertDoesNotExist()
 
         composeRule.runOnIdle {
             assertEquals(1, retryClicks)
             assertEquals(1, settingsClicks)
-            assertEquals(1, imuClicks)
         }
     }
 }

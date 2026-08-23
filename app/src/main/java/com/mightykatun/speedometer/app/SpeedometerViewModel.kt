@@ -8,7 +8,6 @@ import com.mightykatun.speedometer.app.domain.SessionStatisticsTracker
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import com.mightykatun.speedometer.app.domain.model.SpeedometerState
 import com.mightykatun.speedometer.app.domain.model.SpeedTrendSample
-import kotlin.math.exp
 
 class SpeedometerViewModel(
     private val sessionTracker: SessionStatisticsTracker
@@ -92,17 +91,8 @@ class SpeedometerViewModel(
             return state.speedTrend
         }
         val existing = state.speedTrend
-        val previous = existing.lastOrNull()
-
-        val smoothedSpeed = if (speedKmh == null || previous?.speedKmh == null) {
-            speedKmh
-        } else {
-            val elapsedSeconds = (timestampNanos - previous.timestampNanos) / NANOS_PER_SECOND
-            val alpha = (1.0 - exp(-elapsedSeconds / TREND_SMOOTHING_SECONDS)).coerceIn(0.0, 1.0)
-            (previous.speedKmh + alpha.toFloat() * (speedKmh - previous.speedKmh))
-        }
         val cutoff = timestampNanos - TREND_WINDOW_NANOS
-        return (existing + SpeedTrendSample(timestampNanos, smoothedSpeed))
+        return (existing + SpeedTrendSample(timestampNanos, speedKmh))
             .dropWhile { it.timestampNanos < cutoff }
             .takeLast(MAX_TREND_SAMPLES)
     }
@@ -110,8 +100,6 @@ class SpeedometerViewModel(
     private companion object {
         const val TREND_WINDOW_NANOS = 30_000_000_000L
         const val TREND_SAMPLE_PERIOD_NANOS = 100_000_000L
-        const val NANOS_PER_SECOND = 1_000_000_000.0
-        const val TREND_SMOOTHING_SECONDS = 0.55
         const val MAX_TREND_SAMPLES = 360
     }
 }

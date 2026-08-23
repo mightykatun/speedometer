@@ -118,7 +118,6 @@ class SpeedEstimator(
     fun reset(trackingMode: TrackingMode = mode) {
         mode = trackingMode
         state = State(p11 = config.initialBiasVariance)
-        if (trackingMode == TrackingMode.IMU_ONLY) initializeImuOnly()
         historyBase = state.copy()
         historyBaseInputNanos = 0L
         history.clear()
@@ -144,27 +143,20 @@ class SpeedEstimator(
                 )
             }
         }
-        if (mode != TrackingMode.IMU_ONLY && trackingMode != TrackingMode.IMU_ONLY) {
-            mode = trackingMode
-            clearCourse()
-            history.clear()
-            historyStart = 0
-            gnssTimestamps.clear()
-            motionTimestamps.clear()
-            orientationTimestamps.clear()
-            pendingCandidateChanges.clear()
-            historyBase = state.copy()
-            historyBaseInputNanos = state.lastTimestampNanos
-            finalizedChanges.values.forEach(::queueCandidateChange)
-            return
-        }
-
-        reset(trackingMode)
+        mode = trackingMode
+        clearCourse()
+        history.clear()
+        historyStart = 0
+        gnssTimestamps.clear()
+        motionTimestamps.clear()
+        orientationTimestamps.clear()
+        pendingCandidateChanges.clear()
+        historyBase = state.copy()
+        historyBaseInputNanos = state.lastTimestampNanos
         finalizedChanges.values.forEach(::queueCandidateChange)
     }
 
     fun ingestGnssMeasurement(measurement: GnssMeasurement) {
-        if (mode == TrackingMode.IMU_ONLY) return
         if (measurement.timestampNanos <= historyBaseInputNanos || measurement.timestampNanos <= 0L) return
         if (!gnssTimestamps.add(measurement.timestampNanos)) return
 
@@ -181,8 +173,7 @@ class SpeedEstimator(
         if (!hasFiniteMotionValues(measurement)) return
         if (measurement.timestampNanos <= historyBaseInputNanos) return
         if (!motionTimestamps.add(measurement.timestampNanos)) return
-        if (mode != TrackingMode.IMU_ONLY &&
-            measurement.orientationTimestampNanos > historyBaseInputNanos &&
+        if (measurement.orientationTimestampNanos > historyBaseInputNanos &&
             orientationTimestamps.add(measurement.orientationTimestampNanos)
         ) {
             insertAndProcess(
@@ -201,15 +192,6 @@ class SpeedEstimator(
     fun snapshotAt(timestampNanos: Long): SpeedEstimate {
         val snapshotTimestamp = latestTimestamp(timestampNanos)
         val candidateChanges = drainCandidateChanges()
-        if (mode == TrackingMode.IMU_ONLY && state.lastTimestampNanos == 0L) {
-            return SpeedEstimate(
-                speedMetersPerSecond = null,
-                uncertaintyMetersPerSecond = Double.POSITIVE_INFINITY,
-                quality = EstimateQuality.ACQUIRING,
-                timestampNanos = snapshotTimestamp,
-                maximumCandidateChanges = candidateChanges
-            )
-        }
         if (!state.initialized) {
             return SpeedEstimate(
                 speedMetersPerSecond = null,
@@ -228,9 +210,6 @@ class SpeedEstimator(
         val uncertainty = sqrt(max(0.0, projectedVariance))
         val age = max(0L, snapshotTimestamp - state.lastAcceptedGnssNanos)
         val quality = when {
-            mode == TrackingMode.IMU_ONLY &&
-                uncertainty <= config.maximumImuOnlyUncertaintyMetersPerSecond -> EstimateQuality.DEGRADED
-            mode == TrackingMode.IMU_ONLY -> EstimateQuality.UNAVAILABLE
             age <= config.trackingAgeNanos &&
                 2.0 * uncertainty <= config.maximumTrackingTwoSigmaMetersPerSecond -> EstimateQuality.TRACKING
             age <= config.unavailableAgeNanos -> EstimateQuality.DEGRADED
@@ -295,7 +274,6 @@ class SpeedEstimator(
         }
 
     private fun processGnss(measurement: GnssMeasurement): MaximumCandidate? {
-        if (mode == TrackingMode.IMU_ONLY) return null
         invalidateCourseIfUnusable(measurement, measurement.speedMetersPerSecond)
         if (!isUsableMeasurement(measurement)) {
             state.outlierCount = 0
@@ -429,12 +407,7 @@ class SpeedEstimator(
             val currentAcceleration = requireNotNull(acceleration)
             val previousAcceleration = state.lastLongitudinalAcceleration ?: currentAcceleration.value
             val meanAcceleration = (previousAcceleration + currentAcceleration.value) / 2.0
-            val unconstrainedSpeed = state.speed + (meanAcceleration - state.bias) * dt
-            val candidateSpeed = if (mode == TrackingMode.IMU_ONLY) {
-                max(0.0, unconstrainedSpeed)
-            } else {
-                unconstrainedSpeed
-            }
+            val candidateSpeed = state.speed + (meanAcceleration - state.bias) * dt
             if (isInsideInertialEnvelope(candidateSpeed, timestampNanos)) {
                 state.speed = candidateSpeed
                 integratedAcceleration = currentAcceleration.value
@@ -538,17 +511,6 @@ class SpeedEstimator(
         state.stationaryExitCandidateNanos = 0L
     }
 
-    private fun initializeImuOnly() {
-        state.initialized = true
-        state.speed = 0.0
-        state.bias = 0.0
-        state.p00 = config.zeroVelocityVariance
-        state.p01 = 0.0
-        state.p10 = 0.0
-        state.p11 = config.initialBiasVariance
-        state.stationary = true
-    }
-
     private fun updateCourse(measurement: GnssMeasurement, speed: Double) {
         if (mode != TrackingMode.FIXED) return
         val reliableYaw = state.lastReliableYawRadians ?: return clearCourse()
@@ -602,14 +564,7 @@ class SpeedEstimator(
     }
 
     private fun accelerationProjection(measurement: MotionMeasurement): AccelerationProjection? {
-        if (mode == TrackingMode.HANDHELD) return null
-        if (mode == TrackingMode.IMU_ONLY) {
-            return AccelerationProjection(
-                measurement.accelerationDeviceYMetersPerSecondSquared,
-                measurement.accelerationDeviceXMetersPerSecondSquared,
-                measurement.accelerationDeviceZMetersPerSecondSquared
-            )
-        }
+        if (mode != TrackingMode.FIXED) return null
         if (!measurement.orientationReliable) return null
         if (measurement.timestampNanos - state.courseAnchorNanos > config.maximumCourseAgeNanos) return null
         val anchorCourse = state.courseRadians ?: return null
@@ -790,9 +745,6 @@ class SpeedEstimator(
     }
 
     private fun isInsideInertialEnvelope(candidateSpeed: Double, timestampNanos: Long): Boolean {
-        if (mode == TrackingMode.IMU_ONLY) {
-            return candidateSpeed in 0.0..config.maximumImuOnlySpeedMetersPerSecond
-        }
         val anchorSpeed = state.lastGnssSpeed ?: return false
         val anchorSigma = state.lastGnssSigma ?: return false
         val elapsedNanos = timestampNanos - state.lastGnssCorrectionNanos
@@ -845,7 +797,6 @@ class SpeedEstimator(
     }
 
     private fun maximumCandidate(timestampNanos: Long): MaximumCandidate? {
-        if (mode == TrackingMode.IMU_ONLY) return null
         val uncertainty = sqrt(max(0.0, state.p00))
         val rawGnssUncertainty = state.lastGnssSigma?.let {
             config.speedAccuracyInflation * max(it, config.minimumSpeedAccuracyMetersPerSecond)
@@ -946,9 +897,6 @@ class SpeedEstimator(
             measurement.accelerationEastMetersPerSecondSquared.isFinite() &&
             measurement.accelerationMagneticNorthMetersPerSecondSquared.isFinite() &&
             measurement.accelerationUpMetersPerSecondSquared.isFinite() &&
-            measurement.accelerationDeviceXMetersPerSecondSquared.isFinite() &&
-            measurement.accelerationDeviceYMetersPerSecondSquared.isFinite() &&
-            measurement.accelerationDeviceZMetersPerSecondSquared.isFinite() &&
             measurement.deviceYawRadians.isFinite() && measurement.devicePitchRadians.isFinite() &&
             measurement.deviceRollRadians.isFinite() && measurement.orientationTimestampNanos > 0L &&
             measurement.orientationTimestampNanos <= measurement.timestampNanos

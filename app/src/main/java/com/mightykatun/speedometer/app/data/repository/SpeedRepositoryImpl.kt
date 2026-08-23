@@ -46,7 +46,6 @@ class SpeedRepositoryImpl private constructor(
     private val stopEpoch = AtomicLong()
 
     override val supportsFixedMode: Boolean = motionGateway.supportsFixedMode
-    override val supportsImuOnly: Boolean = motionGateway.supportsImuOnly
 
     // All fields below are mutated only by the repository worker.
     private var lifecycle = Lifecycle.STOPPED
@@ -171,7 +170,7 @@ class SpeedRepositoryImpl private constructor(
 
         private val locationListener = object : LocationListener {
             override fun onLocationChanged(location: Location) {
-                if (!isCurrent() || effectiveMode == TrackingMode.IMU_ONLY) return
+                if (!isCurrent()) return
                 val measurement = createMeasurement(location)
                 estimator.ingestGnssMeasurement(measurement)
                 if (measurement.speedMetersPerSecond != null) emitGnssAvailable()
@@ -225,17 +224,9 @@ class SpeedRepositoryImpl private constructor(
 
         fun start(requestedMode: TrackingMode): Boolean {
             effectiveMode = when (requestedMode) {
-                TrackingMode.IMU_ONLY -> {
-                    if (!registerSensors(includeRotation = false)) {
-                        if (!registerLocationCallbacks()) return false
-                        TrackingMode.HANDHELD
-                    } else {
-                        TrackingMode.IMU_ONLY
-                    }
-                }
                 TrackingMode.FIXED -> {
                     if (!registerLocationCallbacks()) return false
-                    if (registerSensors(includeRotation = true)) TrackingMode.FIXED else TrackingMode.HANDHELD
+                    if (registerSensors()) TrackingMode.FIXED else TrackingMode.HANDHELD
                 }
                 TrackingMode.HANDHELD -> {
                     if (!registerLocationCallbacks()) return false
@@ -279,22 +270,9 @@ class SpeedRepositoryImpl private constructor(
             }
 
             val nextMode = when (requestedMode) {
-                TrackingMode.IMU_ONLY -> {
-                    if (!registerSensors(includeRotation = false)) {
-                        if (!locationRegistered && !registerLocationCallbacks()) return
-                        effectiveMode = TrackingMode.HANDHELD
-                        estimator.setTrackingMode(effectiveMode)
-                        emitTrackingModeChanged(effectiveMode)
-                        emitEstimate(estimator.snapshotAt(worker.elapsedRealtimeNanos()))
-                        return
-                    }
-                    cleanupLocationCallbacks()
-                    clearSatelliteEvidence()
-                    TrackingMode.IMU_ONLY
-                }
                 TrackingMode.FIXED -> {
                     if (!locationRegistered && !registerLocationCallbacks()) return
-                    if (!registerSensors(includeRotation = true)) {
+                    if (!registerSensors()) {
                         effectiveMode = TrackingMode.HANDHELD
                         estimator.setTrackingMode(effectiveMode)
                         emitTrackingModeChanged(effectiveMode)
@@ -351,13 +329,12 @@ class SpeedRepositoryImpl private constructor(
             locationRegistered = false
         }
 
-        private fun registerSensors(includeRotation: Boolean): Boolean {
+        private fun registerSensors(): Boolean {
             unregisterSensors()
             resetSensorState()
-            val supported = if (includeRotation) supportsFixedMode else supportsImuOnly
-            if (!supported || !isCurrent()) return false
+            if (!supportsFixedMode || !isCurrent()) return false
             sensorsRegistered = runCatching {
-                motionGateway.register(sensorListener, includeRotation)
+                motionGateway.register(sensorListener)
             }.getOrDefault(false)
             if (!sensorsRegistered) runCatching { motionGateway.unregister(sensorListener) }
             return sensorsRegistered
@@ -441,25 +418,6 @@ class SpeedRepositoryImpl private constructor(
             val deviceX = event.values[0]
             val deviceY = event.values[1]
             val deviceZ = event.values[2]
-            if (effectiveMode == TrackingMode.IMU_ONLY) {
-                estimator.ingestMotionMeasurement(
-                    MotionMeasurement(
-                        accelerationEastMetersPerSecondSquared = deviceX.toDouble(),
-                        accelerationMagneticNorthMetersPerSecondSquared = deviceY.toDouble(),
-                        accelerationUpMetersPerSecondSquared = deviceZ.toDouble(),
-                        deviceYawRadians = 0.0,
-                        devicePitchRadians = 0.0,
-                        deviceRollRadians = 0.0,
-                        orientationReliable = false,
-                        timestampNanos = event.timestamp,
-                        orientationTimestampNanos = event.timestamp,
-                        accelerationDeviceXMetersPerSecondSquared = deviceX.toDouble(),
-                        accelerationDeviceYMetersPerSecondSquared = deviceY.toDouble(),
-                        accelerationDeviceZMetersPerSecondSquared = deviceZ.toDouble()
-                    )
-                )
-                return
-            }
             if (lastRotationTimestampNanos == 0L ||
                 orientationAgeNanos !in 0..MAX_ORIENTATION_AGE_NANOS
             ) return
@@ -477,10 +435,7 @@ class SpeedRepositoryImpl private constructor(
                     deviceRollRadians = orientation[2].toDouble(),
                     orientationReliable = rotationReliable,
                     timestampNanos = event.timestamp,
-                    orientationTimestampNanos = lastRotationTimestampNanos,
-                    accelerationDeviceXMetersPerSecondSquared = deviceX.toDouble(),
-                    accelerationDeviceYMetersPerSecondSquared = deviceY.toDouble(),
-                    accelerationDeviceZMetersPerSecondSquared = deviceZ.toDouble()
+                    orientationTimestampNanos = lastRotationTimestampNanos
                 )
             )
         }

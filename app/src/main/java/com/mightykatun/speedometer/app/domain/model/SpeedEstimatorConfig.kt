@@ -48,7 +48,5 @@ data class SpeedEstimatorConfig(
     val stationaryAccelerationMetersPerSecondSquared: Double = 0.15,
     val stationaryExitAccelerationMetersPerSecondSquared: Double = 0.25,
     val stationaryExitDwellNanos: Long = 200_000_000L,
-    val zeroVelocityVariance: Double = 0.0025,
-    val maximumImuOnlySpeedMetersPerSecond: Double = 80.0,
-    val maximumImuOnlyUncertaintyMetersPerSecond: Double = 10.0
+    val zeroVelocityVariance: Double = 0.0025
 )

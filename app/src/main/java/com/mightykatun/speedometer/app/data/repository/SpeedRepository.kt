@@ -5,7 +5,6 @@ import com.mightykatun.speedometer.app.domain.model.TrackingMode
 
 interface SpeedRepository {
     val supportsFixedMode: Boolean
-    val supportsImuOnly: Boolean
 
     fun startUpdates(
         trackingMode: TrackingMode,

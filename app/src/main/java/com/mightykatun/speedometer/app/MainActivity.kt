@@ -91,18 +91,11 @@ class MainActivity : ComponentActivity() {
         val preferences = getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
         speedUnit = SpeedUnit.fromPreference(preferences.getString(SPEED_UNIT_KEY, null))
         preferredTrackingMode = TrackingMode.fromPreference(preferences.getString(TRACKING_MODE_KEY, null))
-            .takeIf { mode ->
-                when (mode) {
-                    TrackingMode.HANDHELD -> true
-                    TrackingMode.FIXED -> speedRepository.supportsFixedMode
-                    TrackingMode.IMU_ONLY -> speedRepository.supportsImuOnly
-                }
-            }
+            .takeIf { it != TrackingMode.FIXED || speedRepository.supportsFixedMode }
             ?: TrackingMode.HANDHELD
         trackingMode = preferredTrackingMode
         
-        if (preferredTrackingMode != TrackingMode.IMU_ONLY &&
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
             != PackageManager.PERMISSION_GRANTED) {
             if (preferences.getBoolean(LOCATION_PERMISSION_REQUESTED_KEY, false)) {
                 permissionIssue = currentPermissionIssue()
@@ -120,7 +113,6 @@ class MainActivity : ComponentActivity() {
                 speedUnit = speedUnit,
                 trackingMode = trackingMode,
                 supportsFixedMode = speedRepository.supportsFixedMode,
-                supportsImuOnly = speedRepository.supportsImuOnly,
                 supportsPip = supportsPictureInPicture(),
                 permissionMessage = permissionIssue?.message,
                 onSpeedUnitClick = { cycleSpeedUnit() },
@@ -128,8 +120,7 @@ class MainActivity : ComponentActivity() {
                 onReset = { restartMeasurements() },
                 onEnterPip = { enterPipMode() },
                 onRequestPermission = { requestLocationPermission() },
-                onOpenSettings = { openAppSettings() },
-                onUseImu = { changeTrackingMode(TrackingMode.IMU_ONLY) }
+                onOpenSettings = { openAppSettings() }
             )
         }
     }
@@ -164,34 +155,22 @@ class MainActivity : ComponentActivity() {
 
     private fun cycleTrackingMode() {
         val nextMode = when (preferredTrackingMode) {
-            TrackingMode.HANDHELD -> when {
-                speedRepository.supportsFixedMode -> TrackingMode.FIXED
-                speedRepository.supportsImuOnly -> TrackingMode.IMU_ONLY
-                else -> TrackingMode.HANDHELD
-            }
-            TrackingMode.FIXED -> if (speedRepository.supportsImuOnly) {
-                TrackingMode.IMU_ONLY
-            } else {
-                TrackingMode.HANDHELD
-            }
-            TrackingMode.IMU_ONLY -> TrackingMode.HANDHELD
+            TrackingMode.HANDHELD -> if (speedRepository.supportsFixedMode) {
+                TrackingMode.FIXED
+            } else TrackingMode.HANDHELD
+            TrackingMode.FIXED -> TrackingMode.HANDHELD
         }
         changeTrackingMode(nextMode)
     }
 
     private fun changeTrackingMode(nextMode: TrackingMode) {
-        val previousMode = preferredTrackingMode
         preferredTrackingMode = nextMode
         trackingMode = preferredTrackingMode
         getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(TRACKING_MODE_KEY, preferredTrackingMode.preferenceValue)
             .apply()
-        if (trackingModeTransitionRequiresReset(previousMode, nextMode)) {
-            restartMeasurements()
-        } else {
-            speedRepository.setTrackingMode(nextMode)
-        }
+        speedRepository.setTrackingMode(nextMode)
     }
 
     override fun onStart() {
@@ -209,10 +188,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkPermissionsAndStart() {
-        if (preferredTrackingMode == TrackingMode.IMU_ONLY) {
-            permissionIssue = null
-            startSpeedTracking()
-        } else if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
             == PackageManager.PERMISSION_GRANTED) {
             permissionIssue = null
             startSpeedTracking()
@@ -240,17 +216,9 @@ class MainActivity : ComponentActivity() {
                         .edit()
                         .putString(TRACKING_MODE_KEY, TrackingMode.HANDHELD.preferenceValue)
                         .apply()
-                    if (requestedMode == TrackingMode.IMU_ONLY &&
-                        ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) !=
-                        PackageManager.PERMISSION_GRANTED
-                    ) {
-                        permissionIssue = currentPermissionIssue()
-                    }
                 }
                 viewModel.onWarning(
                     when {
-                        effectiveMode == TrackingMode.IMU_ONLY ->
-                            IMU_ZERO_SEED_WARNING
                         requestedMode != TrackingMode.HANDHELD && effectiveMode == TrackingMode.HANDHELD ->
                             "Motion sensors unavailable; using GNSS only"
                         else -> null
@@ -326,7 +294,6 @@ fun SpeedometerScreen(
     speedUnit: SpeedUnit,
     trackingMode: TrackingMode,
     supportsFixedMode: Boolean,
-    supportsImuOnly: Boolean,
     supportsPip: Boolean,
     permissionMessage: String?,
     onSpeedUnitClick: () -> Unit,
@@ -334,8 +301,7 @@ fun SpeedometerScreen(
     onReset: () -> Unit,
     onEnterPip: () -> Unit,
     onRequestPermission: () -> Unit,
-    onOpenSettings: () -> Unit,
-    onUseImu: () -> Unit
+    onOpenSettings: () -> Unit
 ) {
     val isDark = isSystemInDarkTheme()
     val backgroundColor = if (isDark) Color.Black else Color.White
@@ -344,11 +310,7 @@ fun SpeedometerScreen(
     val tertiaryColor = if (isDark) Color.DarkGray else Color.Gray
     val labelColor = if (isDark) Color.Gray else Color.DarkGray
 
-    val statusColor = when {
-        trackingMode == TrackingMode.IMU_ONLY -> Color(0xFF48D7FF)
-        state.satelliteCount >= 3 -> Color.Green
-        else -> Color.Red
-    }
+    val statusColor = if (state.satelliteCount >= 3) Color.Green else Color.Red
     val currentSpeed = state.currentSpeedKmh?.let(speedUnit::fromKilometersPerHour)
     val currentAccuracy = state.speedAccuracyKmh?.let(speedUnit::fromKilometersPerHour)
     val maxSpeed = speedUnit.fromKilometersPerHour(state.maxSpeedKmh)
@@ -366,9 +328,7 @@ fun SpeedometerScreen(
         val showTrend = !isInPipMode && fontAwareHeight >= 300.dp
         val showStats = !isInPipMode && fontAwareHeight >= 240.dp
         val compactActions = fontAwareHeight < 240.dp
-        val compactWarning = warning?.takeIf {
-            compactActions && it != IMU_ZERO_SEED_WARNING
-        }
+        val compactWarning = warning?.takeIf { compactActions }
         val baselineCompact = maxHeight < 480.dp
         val baselineVeryCompact = maxHeight < 340.dp
         fun displaySize(baselineSize: Float) =
@@ -399,8 +359,6 @@ fun SpeedometerScreen(
                 message = permissionMessage,
                 onRequestPermission = onRequestPermission,
                 onOpenSettings = onOpenSettings,
-                onUseImu = onUseImu,
-                supportsImu = supportsImuOnly,
                 modifier = Modifier.align(Alignment.Center)
             )
         } else if (error != null) {
@@ -462,15 +420,6 @@ fun SpeedometerScreen(
                                     contentDescription = compactWarning
                                 }
                             )
-                        } else if (trackingMode == TrackingMode.IMU_ONLY) {
-                            Text(
-                                text = "zero-seeded imu",
-                                color = primaryColor,
-                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                                maxLines = 1
-                            )
                         } else {
                             Text(
                                 text = "satellites: ",
@@ -494,13 +443,13 @@ fun SpeedometerScreen(
                         modifier = Modifier
                             .fillMaxHeight()
                             .clickable(
-                                enabled = supportsFixedMode || supportsImuOnly,
+                                enabled = supportsFixedMode,
                                 role = Role.Button,
                                 onClick = onTrackingModeChange
                             )
                             .semantics {
                                 contentDescription = "Tracking mode"
-                                stateDescription = trackingMode.accessibilityDescription
+                                stateDescription = trackingMode.displayLabel
                             },
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -513,7 +462,7 @@ fun SpeedometerScreen(
                         )
                         Text(
                             text = trackingMode.displayLabel,
-                            color = if (supportsFixedMode || supportsImuOnly) primaryColor else labelColor,
+                            color = if (supportsFixedMode) primaryColor else labelColor,
                             fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
                             fontSize = 14.sp,
@@ -533,12 +482,12 @@ fun SpeedometerScreen(
                         .fillMaxWidth()
                         .height(
                             when {
-                                veryCompactLayout -> 128.dp
-                                compactLayout -> 144.dp
-                                else -> 184.dp
+                                veryCompactLayout -> 148.dp
+                                compactLayout -> 164.dp
+                                else -> 204.dp
                             }
                         )
-                        .padding(bottom = 96.dp)
+                        .padding(bottom = 116.dp)
                         .semantics {
                             contentDescription = speedTrendDescription(
                                 state.speedTrend,
@@ -632,44 +581,26 @@ fun SpeedometerScreen(
                     ) {
                         StatRow(
                             label = "top speed",
-                            value = if (trackingMode == TrackingMode.IMU_ONLY) {
-                                "gnss only"
-                            } else {
-                                "%.1f %s".format(Locale.US, maxSpeed, speedUnit.label)
-                            },
+                            value = "%.1f %s".format(Locale.US, maxSpeed, speedUnit.label),
                             labelColor,
                             primaryColor
                         )
-                        if (trackingMode != TrackingMode.IMU_ONLY) {
-                            StatRow(
-                                label = "top satellites",
-                                value = "${state.maxSatelliteCount}",
-                                labelColor,
-                                primaryColor
-                            )
-                        }
+                        StatRow(
+                            label = "top satellites",
+                            value = "${state.maxSatelliteCount}",
+                            labelColor,
+                            primaryColor
+                        )
                     }
                 }
 
-                if (compactActions) {
-                    Row(
-                        modifier = Modifier.align(Alignment.BottomEnd),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        MinimalAction(text = "reset", color = primaryColor, onClick = onReset)
-                        if (supportsPip) {
-                            MinimalAction(text = "float", color = primaryColor, onClick = onEnterPip)
-                        }
-                    }
-                } else {
-                    Column(
-                        modifier = Modifier.align(Alignment.BottomEnd),
-                        horizontalAlignment = Alignment.End
-                    ) {
-                        MinimalAction(text = "reset", color = primaryColor, onClick = onReset)
-                        if (supportsPip) {
-                            MinimalAction(text = "float", color = primaryColor, onClick = onEnterPip)
-                        }
+                Column(
+                    modifier = Modifier.align(Alignment.BottomEnd),
+                    horizontalAlignment = Alignment.End
+                ) {
+                    StatAction(text = "reset", color = primaryColor, onClick = onReset)
+                    if (supportsPip) {
+                        StatAction(text = "float", color = primaryColor, onClick = onEnterPip)
                     }
                 }
             }
@@ -682,8 +613,6 @@ private fun PermissionRecovery(
     message: String,
     onRequestPermission: () -> Unit,
     onOpenSettings: () -> Unit,
-    onUseImu: () -> Unit,
-    supportsImu: Boolean,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -702,11 +631,6 @@ private fun PermissionRecovery(
         }
         Button(onClick = onOpenSettings) {
             Text("open settings")
-        }
-        if (supportsImu) {
-            Button(onClick = onUseImu) {
-                Text("use imu only")
-            }
         }
     }
 }
@@ -786,6 +710,20 @@ private fun MinimalAction(text: String, color: Color, onClick: () -> Unit) {
 }
 
 @Composable
+private fun StatAction(text: String, color: Color, onClick: () -> Unit) {
+    Text(
+        text = text,
+        color = color,
+        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+        fontWeight = FontWeight.Bold,
+        fontSize = 14.sp,
+        modifier = Modifier
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 2.dp)
+    )
+}
+
+@Composable
 private fun SpeedTrendChart(
     samples: List<SpeedTrendSample>,
     currentSpeedKmh: Float?,
@@ -813,14 +751,49 @@ private fun SpeedTrendChart(
             endX = size.width
         )
         val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-        var path: Path? = null
-        var previous: Offset? = null
+        val segment = ArrayList<Offset>()
 
-        fun drawCurrentPath() {
-            previous?.let { last -> path?.lineTo(last.x, last.y) }
-            path?.let { drawPath(it, brush, style = stroke) }
-            path = null
-            previous = null
+        fun drawCurrentSegment() {
+            if (segment.size < 2) {
+                segment.clear()
+                return
+            }
+            val path = Path().apply { moveTo(segment.first().x, segment.first().y) }
+            if (segment.size == 2) {
+                path.lineTo(segment.last().x, segment.last().y)
+            } else {
+                val slopes = FloatArray(segment.size - 1) { index ->
+                    val dx = segment[index + 1].x - segment[index].x
+                    if (dx == 0f) 0f else (segment[index + 1].y - segment[index].y) / dx
+                }
+                val tangents = FloatArray(segment.size)
+                tangents[0] = slopes.first()
+                tangents[tangents.lastIndex] = slopes.last()
+                for (index in 1 until tangents.lastIndex) {
+                    val before = slopes[index - 1]
+                    val after = slopes[index]
+                    tangents[index] = if (before == 0f || after == 0f || before * after <= 0f) {
+                        0f
+                    } else {
+                        2f * before * after / (before + after)
+                    }
+                }
+                for (index in 0 until segment.lastIndex) {
+                    val start = segment[index]
+                    val end = segment[index + 1]
+                    val dx = end.x - start.x
+                    path.cubicTo(
+                        start.x + dx / 3f,
+                        start.y + tangents[index] * dx / 3f,
+                        end.x - dx / 3f,
+                        end.y - tangents[index + 1] * dx / 3f,
+                        end.x,
+                        end.y
+                    )
+                }
+            }
+            drawPath(path, brush, style = stroke)
+            segment.clear()
         }
 
         val pointInset = 7.dp.toPx()
@@ -833,7 +806,7 @@ private fun SpeedTrendChart(
             }
             val speed = speedKmh
             if (speed == null) {
-                drawCurrentPath()
+                drawCurrentSegment()
                 return@forEachIndexed
             }
             val x = ((sample.timestampNanos - startTimestamp).toDouble() / TREND_WINDOW_NANOS)
@@ -841,17 +814,9 @@ private fun SpeedTrendChart(
             val y = (size.height - ((speed - lower) / verticalRange).coerceIn(0f, 1f) * size.height)
                 .coerceIn(pointInset, size.height - pointInset)
             val point = Offset(x, y)
-            val currentPath = path ?: Path().also {
-                it.moveTo(point.x, point.y)
-                path = it
-            }
-            previous?.let { prior ->
-                val middle = Offset((prior.x + point.x) / 2f, (prior.y + point.y) / 2f)
-                currentPath.quadraticBezierTo(prior.x, prior.y, middle.x, middle.y)
-            }
-            previous = point
+            segment += point
         }
-        drawCurrentPath()
+        drawCurrentSegment()
 
         val currentSpeed = currentSpeedKmh ?: return@Canvas
         val currentY = size.height -
@@ -866,13 +831,6 @@ private val TrackingMode.displayLabel: String
     get() = when (this) {
         TrackingMode.HANDHELD -> "gnss"
         TrackingMode.FIXED -> "gnss+imu"
-        TrackingMode.IMU_ONLY -> "imu"
-    }
-
-private val TrackingMode.accessibilityDescription: String
-    get() = when (this) {
-        TrackingMode.IMU_ONLY -> "imu, starts at zero; reset only while stopped"
-        else -> displayLabel
     }
 
 internal fun speedTrendDescription(
@@ -900,14 +858,8 @@ internal fun speedTrendDescription(
         .format(Locale.US, latestSpeed, speedUnit.label)
 }
 
-internal fun trackingModeTransitionRequiresReset(
-    previousMode: TrackingMode,
-    nextMode: TrackingMode
-): Boolean = previousMode == TrackingMode.IMU_ONLY || nextMode == TrackingMode.IMU_ONLY
-
 private const val TREND_WINDOW_NANOS = 30_000_000_000L
 private const val TREND_DIRECTION_THRESHOLD_KMH = 0.5f
-private const val IMU_ZERO_SEED_WARNING = "IMU starts at 0; reset only while stopped"
 
 @Composable
 fun StatRow(label: String, value: String, labelColor: Color, valueColor: Color) {
