@@ -8,6 +8,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import com.mightykatun.speedometer.app.domain.model.RefreshRate
 import com.mightykatun.speedometer.app.domain.model.SpeedUnit
 import com.mightykatun.speedometer.app.domain.model.SpeedometerState
 import com.mightykatun.speedometer.app.domain.model.TrackingMode
@@ -23,6 +24,7 @@ class SpeedometerScreenTest {
     fun controlsInvokeTheirCallbacks() {
         var unitClicks = 0
         var modeClicks = 0
+        var refreshClicks = 0
         var resetClicks = 0
         var pipClicks = 0
 
@@ -34,11 +36,13 @@ class SpeedometerScreenTest {
                 isInPipMode = false,
                 speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
                 trackingMode = TrackingMode.HANDHELD,
+                refreshRate = RefreshRate.ONE_SECOND,
                 supportsFixedMode = true,
                 supportsPip = true,
                 permissionMessage = null,
                 onSpeedUnitClick = { unitClicks++ },
                 onTrackingModeChange = { modeClicks++ },
+                onRefreshRateChange = { refreshClicks++ },
                 onReset = { resetClicks++ },
                 onEnterPip = { pipClicks++ },
                 onRequestPermission = {},
@@ -50,12 +54,16 @@ class SpeedometerScreenTest {
         composeRule.onNodeWithContentDescription("Tracking mode")
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "gnss"))
             .performClick()
+        composeRule.onNodeWithContentDescription("Refresh rate")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "1 second"))
+            .performClick()
         composeRule.onNodeWithText("reset").performClick()
         composeRule.onNodeWithText("float").performClick()
 
         composeRule.runOnIdle {
             assertEquals(1, unitClicks)
             assertEquals(1, modeClicks)
+            assertEquals(1, refreshClicks)
             assertEquals(1, resetClicks)
             assertEquals(1, pipClicks)
         }
@@ -74,11 +82,13 @@ class SpeedometerScreenTest {
                 isInPipMode = false,
                 speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
                 trackingMode = TrackingMode.HANDHELD,
+                refreshRate = RefreshRate.ONE_SECOND,
                 supportsFixedMode = true,
                 supportsPip = true,
                 permissionMessage = "Precise location is required",
                 onSpeedUnitClick = {},
                 onTrackingModeChange = {},
+                onRefreshRateChange = {},
                 onReset = {},
                 onEnterPip = {},
                 onRequestPermission = { retryClicks++ },

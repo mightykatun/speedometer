@@ -25,6 +25,7 @@ The app remains a single-screen HUD with no navigation graph.
 - Persisted text-only `gnss` / `gnss+imu` selector matching the HUD labels
 - Defaults to `gnss`
 - Disabled when the device lacks either linear acceleration or rotation-vector sensors
+- A persisted global refresh selector below the mode control cycles through 0.5, 1, and 2 seconds
 - Hidden in Picture-in-Picture mode
 
 ### Center
@@ -50,7 +51,7 @@ Estimate states:
 
 - Top speed records accepted raw GNSS candidates after a two-second warmup, with at least three satellites and no estimator probation
 - Top satellites tracks the session maximum independently
-- A smoothed 30-second trend tail fades toward the left and ends at the current-speed point on the right
+- A live-smoothed 30-second trend tail fades toward the left and animates between global UI refreshes
 - `reset` restarts acquisition and session statistics
 - Text-only `float` enters Picture-in-Picture on Android 8+
 
@@ -93,6 +94,8 @@ TYPE_ROTATION_VECTOR ──────────┘             │
 ```
 
 `SpeedRepositoryImpl` serializes location and sensor callbacks on one `HandlerThread`. A 10 Hz tick keeps stale-data state current, while accepted location callbacks may emit immediately. Starting and stopping are idempotent. Listeners remain active across configuration recreation and are removed when `onStop` represents real backgrounding.
+
+Refresh selection is presentation-only. Repository estimates and session statistics continue at 10 Hz; speed, uncertainty, quality, maxima, satellites, and the graph publish together at the selected UI interval. Unavailable/recovered speed transitions publish immediately, and interpolated graph values never feed the estimator or statistics.
 
 GNSS satellite callbacks update the displayed count and timestamped satellite evidence for subsequent fixes. They never replay a cached `Location` and never refresh fix age.
 
@@ -172,7 +175,7 @@ No watchdog injects fake zero readings.
 - Acquisition starts in `onStart` after precise-location permission is available
 - Acquisition and sensor listeners survive configuration recreation but stop when the app backgrounds
 - Session statistics reset when the app backgrounds
-- Display unit and tracking mode persist locally
+- Display unit, tracking mode, and global refresh interval persist locally
 - No location, motion, or session history leaves the device
 
 ## Errors and Fallbacks

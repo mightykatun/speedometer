@@ -15,6 +15,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -47,6 +50,7 @@ import androidx.core.app.ActivityCompat
 
 import com.mightykatun.speedometer.app.di.SpeedometerViewModelFactory
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
+import com.mightykatun.speedometer.app.domain.model.RefreshRate
 import com.mightykatun.speedometer.app.domain.model.SpeedUnit
 import com.mightykatun.speedometer.app.domain.model.SpeedometerState
 import com.mightykatun.speedometer.app.domain.model.SpeedTrendSample
@@ -63,6 +67,7 @@ class MainActivity : ComponentActivity() {
     private var isInPipMode by mutableStateOf(false)
     private var speedUnit by mutableStateOf(SpeedUnit.KILOMETERS_PER_HOUR)
     private var trackingMode by mutableStateOf(TrackingMode.HANDHELD)
+    private var refreshRate by mutableStateOf(RefreshRate.ONE_SECOND)
     private var preferredTrackingMode = TrackingMode.HANDHELD
     private var permissionIssue by mutableStateOf<LocationPermissionIssue?>(null)
     private var permissionRequestInFlight = false
@@ -90,6 +95,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val preferences = getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
         speedUnit = SpeedUnit.fromPreference(preferences.getString(SPEED_UNIT_KEY, null))
+        refreshRate = RefreshRate.fromPreference(
+            preferences.getString(REFRESH_RATE_KEY, null)
+        )
+        viewModel.onRefreshRateChanged(refreshRate)
         preferredTrackingMode = TrackingMode.fromPreference(preferences.getString(TRACKING_MODE_KEY, null))
             .takeIf { it != TrackingMode.FIXED || speedRepository.supportsFixedMode }
             ?: TrackingMode.HANDHELD
@@ -112,11 +121,13 @@ class MainActivity : ComponentActivity() {
                 isInPipMode = isInPipMode,
                 speedUnit = speedUnit,
                 trackingMode = trackingMode,
+                refreshRate = refreshRate,
                 supportsFixedMode = speedRepository.supportsFixedMode,
                 supportsPip = supportsPictureInPicture(),
                 permissionMessage = permissionIssue?.message,
                 onSpeedUnitClick = { cycleSpeedUnit() },
                 onTrackingModeChange = { cycleTrackingMode() },
+                onRefreshRateChange = { cycleRefreshRate() },
                 onReset = { restartMeasurements() },
                 onEnterPip = { enterPipMode() },
                 onRequestPermission = { requestLocationPermission() },
@@ -161,6 +172,15 @@ class MainActivity : ComponentActivity() {
             TrackingMode.FIXED -> TrackingMode.HANDHELD
         }
         changeTrackingMode(nextMode)
+    }
+
+    private fun cycleRefreshRate() {
+        refreshRate = refreshRate.next()
+        viewModel.onRefreshRateChanged(refreshRate)
+        getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(REFRESH_RATE_KEY, refreshRate.preferenceValue)
+            .apply()
     }
 
     private fun changeTrackingMode(nextMode: TrackingMode) {
@@ -276,6 +296,7 @@ class MainActivity : ComponentActivity() {
         const val PREFERENCES_NAME = "speedometer_preferences"
         const val SPEED_UNIT_KEY = "speed_unit"
         const val TRACKING_MODE_KEY = "tracking_mode"
+        const val REFRESH_RATE_KEY = "refresh_rate"
         const val LOCATION_PERMISSION_REQUESTED_KEY = "location_permission_requested"
     }
 }
@@ -293,11 +314,13 @@ fun SpeedometerScreen(
     isInPipMode: Boolean,
     speedUnit: SpeedUnit,
     trackingMode: TrackingMode,
+    refreshRate: RefreshRate,
     supportsFixedMode: Boolean,
     supportsPip: Boolean,
     permissionMessage: String?,
     onSpeedUnitClick: () -> Unit,
     onTrackingModeChange: () -> Unit,
+    onRefreshRateChange: () -> Unit,
     onReset: () -> Unit,
     onEnterPip: () -> Unit,
     onRequestPermission: () -> Unit,
@@ -326,9 +349,9 @@ fun SpeedometerScreen(
         val compactLayout = fontAwareHeight < 480.dp
         val veryCompactLayout = fontAwareHeight < 340.dp
         val showTrend = !isInPipMode && fontAwareHeight >= 300.dp
-        val showStats = !isInPipMode && fontAwareHeight >= 240.dp
-        val compactActions = fontAwareHeight < 240.dp
-        val compactWarning = warning?.takeIf { compactActions }
+        val showStats = !isInPipMode && fontAwareHeight >= 300.dp
+        val compactActions = !isInPipMode && fontAwareHeight < 300.dp
+        val compactWarning = warning?.takeIf { compactLayout }
         val baselineCompact = maxHeight < 480.dp
         val baselineVeryCompact = maxHeight < 340.dp
         fun displaySize(baselineSize: Float) =
@@ -375,7 +398,7 @@ fun SpeedometerScreen(
                 MinimalAction(text = "reset", color = primaryColor, onClick = onReset)
             }
         } else {
-            if (warning != null && !isInPipMode && !compactActions) {
+            if (warning != null && !isInPipMode && !compactLayout) {
                 Text(
                     text = warning,
                     color = Color(0xFFFFA000),
@@ -383,99 +406,107 @@ fun SpeedometerScreen(
                     fontSize = 13.sp,
                     modifier = Modifier
                         .align(Alignment.TopCenter)
-                        .padding(top = 52.dp)
+                        .padding(top = 100.dp)
                 )
             }
             if (!isInPipMode) {
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
-                        .fillMaxWidth()
-                        .height(48.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .fillMaxWidth(),
+                    verticalAlignment = Alignment.Top
                 ) {
-                    Row(
-                        modifier = Modifier.weight(1f),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(10.dp)
-                                .background(
-                                    if (compactWarning != null) Color(0xFFFFA000) else statusColor,
-                                    shape = androidx.compose.foundation.shape.CircleShape
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            modifier = Modifier.height(48.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(10.dp)
+                                    .background(
+                                        if (compactWarning != null) Color(0xFFFFA000) else statusColor,
+                                        shape = androidx.compose.foundation.shape.CircleShape
+                                    )
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            if (compactWarning != null) {
+                                Text(
+                                    text = compactWarning,
+                                    color = primaryColor,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.semantics {
+                                        contentDescription = compactWarning
+                                    }
                                 )
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        if (compactWarning != null) {
-                            Text(
-                                text = compactWarning,
-                                color = primaryColor,
-                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.semantics {
-                                    contentDescription = compactWarning
-                                }
-                            )
-                        } else {
-                            Text(
-                                text = "satellites: ",
-                                color = labelColor,
-                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                fontSize = 14.sp,
-                                maxLines = 1
-                            )
-                            Text(
-                                text = "${state.satelliteCount}",
-                                color = primaryColor,
-                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                                maxLines = 1
-                            )
+                            } else {
+                                Text(
+                                    text = "satellites: ",
+                                    color = labelColor,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    fontSize = 14.sp,
+                                    maxLines = 1
+                                )
+                                Text(
+                                    text = "${state.satelliteCount}",
+                                    color = primaryColor,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                        if (compactActions) {
+                            Box(
+                                modifier = Modifier.height(48.dp),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                AccuracyIndicator(
+                                    quality = state.estimateQuality,
+                                    speed = currentSpeed,
+                                    accuracy = currentAccuracy,
+                                    unit = speedUnit.label,
+                                    isInPipMode = false
+                                )
+                            }
                         }
                     }
 
-                    Row(
-                        modifier = Modifier
-                            .fillMaxHeight()
-                            .clickable(
-                                enabled = supportsFixedMode,
-                                role = Role.Button,
-                                onClick = onTrackingModeChange
-                            )
-                            .semantics {
-                                contentDescription = "Tracking mode"
-                                stateDescription = trackingMode.displayLabel
-                            },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "mode: ",
-                            color = labelColor,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                            fontSize = 14.sp,
-                            maxLines = 1
+                    Column(horizontalAlignment = Alignment.End) {
+                        HudSelector(
+                            label = "mode",
+                            value = trackingMode.displayLabel,
+                            contentDescription = "Tracking mode",
+                            stateDescription = trackingMode.displayLabel,
+                            labelColor = labelColor,
+                            valueColor = if (supportsFixedMode) primaryColor else labelColor,
+                            enabled = supportsFixedMode,
+                            onClick = onTrackingModeChange
                         )
-                        Text(
-                            text = trackingMode.displayLabel,
-                            color = if (supportsFixedMode) primaryColor else labelColor,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp,
-                            maxLines = 1
+                        HudSelector(
+                            label = "refresh",
+                            value = refreshRate.displayLabel,
+                            contentDescription = "Refresh rate",
+                            stateDescription = refreshRate.accessibilityLabel,
+                            labelColor = labelColor,
+                            valueColor = primaryColor,
+                            enabled = true,
+                            onClick = onRefreshRateChange
                         )
                     }
                 }
             }
 
             if (showTrend) {
-                SpeedTrendChart(
+                LiveSpeedTrendChart(
                     samples = state.speedTrend,
                     currentSpeedKmh = state.currentSpeedKmh,
+                    refreshRate = refreshRate,
                     color = primaryColor,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -504,10 +535,8 @@ fun SpeedometerScreen(
                     .align(Alignment.Center)
                     .offset(
                         y = when {
-                            compactActions -> 8.dp
-                            isInPipMode || !compactLayout || !showTrend -> 0.dp
-                            veryCompactLayout -> (-24).dp
-                            else -> (-36).dp
+                            compactActions -> 32.dp
+                            else -> 0.dp
                         }
                     ),
                 horizontalAlignment = Alignment.CenterHorizontally
@@ -564,13 +593,15 @@ fun SpeedometerScreen(
                     )
                 }
 
-                AccuracyIndicator(
-                    quality = state.estimateQuality,
-                    speed = currentSpeed,
-                    accuracy = currentAccuracy,
-                    unit = speedUnit.label,
-                    isInPipMode = isInPipMode
-                )
+                if (!compactActions) {
+                    AccuracyIndicator(
+                        quality = state.estimateQuality,
+                        speed = currentSpeed,
+                        accuracy = currentAccuracy,
+                        unit = speedUnit.label,
+                        isInPipMode = isInPipMode
+                    )
+                }
             }
 
             if (!isInPipMode) {
@@ -594,17 +625,65 @@ fun SpeedometerScreen(
                     }
                 }
 
-                Column(
-                    modifier = Modifier.align(Alignment.BottomEnd),
-                    horizontalAlignment = Alignment.End
-                ) {
-                    StatAction(text = "reset", color = primaryColor, onClick = onReset)
-                    if (supportsPip) {
-                        StatAction(text = "float", color = primaryColor, onClick = onEnterPip)
+                if (compactActions) {
+                    Row(modifier = Modifier.align(Alignment.BottomEnd)) {
+                        StatAction(text = "reset", color = primaryColor, onClick = onReset)
+                        if (supportsPip) {
+                            StatAction(text = "float", color = primaryColor, onClick = onEnterPip)
+                        }
+                    }
+                } else {
+                    Column(
+                        modifier = Modifier.align(Alignment.BottomEnd),
+                        horizontalAlignment = Alignment.End
+                    ) {
+                        StatAction(text = "reset", color = primaryColor, onClick = onReset)
+                        if (supportsPip) {
+                            StatAction(text = "float", color = primaryColor, onClick = onEnterPip)
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun HudSelector(
+    label: String,
+    value: String,
+    contentDescription: String,
+    stateDescription: String,
+    labelColor: Color,
+    valueColor: Color,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics {
+                this.contentDescription = contentDescription
+                this.stateDescription = stateDescription
+            },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "$label: ",
+            color = labelColor,
+            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+            fontSize = 14.sp,
+            maxLines = 1
+        )
+        Text(
+            text = value,
+            color = valueColor,
+            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            fontSize = 14.sp,
+            maxLines = 1
+        )
     }
 }
 
@@ -687,6 +766,8 @@ private fun AccuracyIndicator(
             color = color,
             fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
             fontSize = 13.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier
                 .semantics { contentDescription = accessibilityText }
                 .padding(top = 8.dp)
@@ -721,6 +802,38 @@ private fun StatAction(text: String, color: Color, onClick: () -> Unit) {
             .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 2.dp)
     )
+}
+
+@Composable
+private fun LiveSpeedTrendChart(
+    samples: List<SpeedTrendSample>,
+    currentSpeedKmh: Float?,
+    refreshRate: RefreshRate,
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    val latest = samples.lastOrNull()
+    val targetSpeed = latest?.speedKmh?.takeIf { currentSpeedKmh != null }
+
+    if (latest == null || targetSpeed == null) {
+        SpeedTrendChart(samples, null, color, modifier)
+        return
+    }
+
+    key(refreshRate) {
+        val animatedSpeed by animateFloatAsState(
+            targetValue = targetSpeed,
+            animationSpec = tween(
+                durationMillis = refreshRate.intervalMillis,
+                easing = FastOutSlowInEasing
+            ),
+            label = "graph speed"
+        )
+        val animatedSamples = samples.toMutableList().apply {
+            this[lastIndex] = latest.copy(speedKmh = animatedSpeed)
+        }
+        SpeedTrendChart(animatedSamples, animatedSpeed, color, modifier)
+    }
 }
 
 @Composable

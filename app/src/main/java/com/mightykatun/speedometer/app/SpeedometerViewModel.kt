@@ -5,6 +5,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import com.mightykatun.speedometer.app.domain.SessionStatisticsTracker
+import com.mightykatun.speedometer.app.domain.model.EstimateQuality
+import com.mightykatun.speedometer.app.domain.model.RefreshRate
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import com.mightykatun.speedometer.app.domain.model.SpeedometerState
 import com.mightykatun.speedometer.app.domain.model.SpeedTrendSample
@@ -15,6 +17,12 @@ class SpeedometerViewModel(
 
     private var sessionActive = false
     private var gpsErrorActive = false
+    private var refreshRate = RefreshRate.ONE_SECOND
+    private var latestPresentation: PendingPresentation? = null
+    private var latestMaxSpeedKmh = 0f
+    private var latestSatelliteCount = 0
+    private var latestMaxSatelliteCount = 0
+    private var lastPresentationTimestampNanos = 0L
 
     var state by mutableStateOf(SpeedometerState())
         private set
@@ -27,24 +35,35 @@ class SpeedometerViewModel(
 
     fun onSpeedEstimateReceived(estimate: SpeedEstimate) {
         val stats = sessionTracker.updateSpeed(estimate)
-        val measuredAccuracyKmh = estimate.uncertaintyMetersPerSecond
-            .takeIf { it.isFinite() }
-            ?.let { (it * 3.6).toFloat() }
-        state = state.copy(
+        latestMaxSpeedKmh = stats.maxSpeedKmh
+        latestSatelliteCount = stats.currentSatellites
+        latestMaxSatelliteCount = stats.maxSatellites
+
+        val candidate = PendingPresentation(
+            timestampNanos = estimate.timestampNanos,
             currentSpeedKmh = stats.currentSpeedKmh,
-            speedAccuracyKmh = measuredAccuracyKmh,
-            estimateQuality = estimate.quality,
-            maxSpeedKmh = stats.maxSpeedKmh,
-            speedTrend = updatedSpeedTrend(estimate.timestampNanos, stats.currentSpeedKmh)
+            speedAccuracyKmh = estimate.uncertaintyMetersPerSecond
+                .takeIf { it.isFinite() }
+                ?.let { (it * 3.6).toFloat() },
+            quality = estimate.quality
         )
+        if (latestPresentation?.timestampNanos?.let { candidate.timestampNanos >= it } != false) {
+            latestPresentation = candidate
+        }
+        publishPresentationIfDue()
     }
 
     fun onSatelliteCountReceived(satelliteCount: Int) {
         val stats = sessionTracker.updateSatelliteCount(satelliteCount)
-        state = state.copy(
-            satelliteCount = stats.currentSatellites,
-            maxSatelliteCount = stats.maxSatellites
-        )
+        latestMaxSpeedKmh = stats.maxSpeedKmh
+        latestSatelliteCount = stats.currentSatellites
+        latestMaxSatelliteCount = stats.maxSatellites
+    }
+
+    fun onRefreshRateChanged(refreshRate: RefreshRate) {
+        if (this.refreshRate == refreshRate) return
+        this.refreshRate = refreshRate
+        publishPresentationIfDue(force = true)
     }
 
     fun onSessionStart() {
@@ -60,6 +79,11 @@ class SpeedometerViewModel(
         errorMessage = null
         warningMessage = null
         gpsErrorActive = false
+        latestPresentation = null
+        latestMaxSpeedKmh = 0f
+        latestSatelliteCount = 0
+        latestMaxSatelliteCount = 0
+        lastPresentationTimestampNanos = 0L
     }
 
     fun onError(message: String) {
@@ -83,23 +107,63 @@ class SpeedometerViewModel(
         }
     }
 
-    private fun updatedSpeedTrend(timestampNanos: Long, speedKmh: Float?): List<SpeedTrendSample> {
-        if (timestampNanos <= 0L) return state.speedTrend
-        val latest = state.speedTrend.lastOrNull()
-        if (latest != null && timestampNanos < latest.timestampNanos) return state.speedTrend
-        if (latest != null && timestampNanos - latest.timestampNanos < TREND_SAMPLE_PERIOD_NANOS) {
-            return state.speedTrend
+    private fun publishPresentationIfDue(force: Boolean = false) {
+        val latest = latestPresentation ?: return
+        val availabilityChanged = (state.currentSpeedKmh == null) != (latest.currentSpeedKmh == null)
+        val unavailableBoundary = state.estimateQuality != latest.quality &&
+            (state.estimateQuality == EstimateQuality.UNAVAILABLE ||
+                latest.quality == EstimateQuality.UNAVAILABLE)
+        val refreshDue = lastPresentationTimestampNanos == 0L ||
+            latest.timestampNanos - lastPresentationTimestampNanos >= refreshRate.intervalNanos
+        if (!force && !availabilityChanged && !unavailableBoundary && !refreshDue) return
+
+        state = state.copy(
+            currentSpeedKmh = latest.currentSpeedKmh,
+            speedAccuracyKmh = latest.speedAccuracyKmh,
+            estimateQuality = latest.quality,
+            maxSpeedKmh = latestMaxSpeedKmh,
+            satelliteCount = latestSatelliteCount,
+            maxSatelliteCount = latestMaxSatelliteCount,
+            speedTrend = updatedSpeedTrend(
+                state.speedTrend,
+                latest.timestampNanos,
+                latest.currentSpeedKmh
+            )
+        )
+        lastPresentationTimestampNanos = maxOf(
+            lastPresentationTimestampNanos,
+            latest.timestampNanos
+        )
+    }
+
+    private fun updatedSpeedTrend(
+        existing: List<SpeedTrendSample>,
+        timestampNanos: Long,
+        speedKmh: Float?
+    ): List<SpeedTrendSample> {
+        if (timestampNanos <= 0L) return existing
+        val latest = existing.lastOrNull()
+        if (latest != null && timestampNanos < latest.timestampNanos) return existing
+        val withoutSameTimestamp = if (latest?.timestampNanos == timestampNanos) {
+            existing.dropLast(1)
+        } else {
+            existing
         }
-        val existing = state.speedTrend
         val cutoff = timestampNanos - TREND_WINDOW_NANOS
-        return (existing + SpeedTrendSample(timestampNanos, speedKmh))
+        return (withoutSameTimestamp + SpeedTrendSample(timestampNanos, speedKmh))
             .dropWhile { it.timestampNanos < cutoff }
             .takeLast(MAX_TREND_SAMPLES)
     }
 
+    private data class PendingPresentation(
+        val timestampNanos: Long,
+        val currentSpeedKmh: Float?,
+        val speedAccuracyKmh: Float?,
+        val quality: EstimateQuality
+    )
+
     private companion object {
         const val TREND_WINDOW_NANOS = 30_000_000_000L
-        const val TREND_SAMPLE_PERIOD_NANOS = 100_000_000L
         const val MAX_TREND_SAMPLES = 360
     }
 }

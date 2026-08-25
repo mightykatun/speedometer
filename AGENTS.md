@@ -1,233 +1,38 @@
-# AGENTS.md - Development Guidelines for Agentic Coding
+# Repository Guide
 
-This file contains build commands, coding standards, and project-specific conventions for agentic coding agents working in this GPS Speedometer Android project.
+## Build And Verification
 
-## Project Overview
+- This is one Android application module, `:app`. Use the checked-in Gradle wrapper; Java 21 matches the release workflow, while app bytecode targets Java 11.
+- Fast local gate: `./gradlew testDebugUnitTest lintDebug assembleDebug`.
+- Run one JVM test class with `./gradlew testDebugUnitTest --tests 'com.mightykatun.speedometer.app.domain.SpeedEstimatorTest'` (replace the fully qualified class name as needed).
+- Compose instrumentation tests need a device or emulator: `./gradlew connectedDebugAndroidTest`. `./gradlew assembleDebugAndroidTest` only compiles the test APK.
+- The only CI workflow is the tag/manual release workflow; there is no pull-request gate. Its build command is `./gradlew --no-build-cache clean test lint assembleDebug stageReleaseSbomInputs`.
+- `make install` builds the debug APK and runs `adb install -r`; `make log` filters logcat to `MainActivity` and `GnssStatus`.
+- Without root `keystore.properties`, `assembleRelease` produces `app/build/outputs/apk/release/app-release-unsigned.apk`. `make release` still prints the signed filename, so do not trust that message when no keystore is configured.
+- `stageReleaseSbomInputs` is release-only: it depends on `assembleRelease`, copies the unsigned APK, and stages exact `releaseRuntimeClasspath` artifacts for Syft.
 
-A minimalist, privacy-focused Android speedometer built with Kotlin and Jetpack Compose. The app provides real-time GPS data with a high-contrast HUD interface designed for readability.
+## Architecture And Invariants
 
-- **Language**: Kotlin
-- **UI Framework**: Jetpack Compose (Material3)
-- **Architecture**: MVVM with ViewModel + Compose
-- **Min SDK**: 24, **Target SDK**: 35
-- **Package**: `com.mightykatun.speedometer.app`
+- `MainActivity.kt` is the real application/UI entrypoint and contains the single-screen Compose UI, permission recovery, Picture-in-Picture, preferences, and lifecycle wiring.
+- `SpeedometerViewModel` owns presentation/session state. `SpeedRepositoryViewModel` separately owns `SpeedRepositoryImpl` so acquisition survives configuration recreation and the worker closes only when that owner is cleared.
+- Real backgrounding (`onStop` when not changing configuration) must stop GNSS/sensor listeners and reset current speed, trend, and session maxima. Only speed unit, requested tracking mode, and global UI refresh rate persist in `SharedPreferences`.
+- `SpeedRepositoryImpl` serializes lifecycle commands, GNSS, location, motion, and estimator calls on one `HandlerThread`. Main-thread deliveries are generation-guarded so callbacks queued before stop/restart cannot leak into a new session; preserve this ordering model.
+- Android boundaries are the injectable worker/dispatcher/location/motion interfaces in `RepositoryPlatform.kt`. Repository lifecycle and ordering behavior is intentionally covered by local JVM tests using fakes, not only device tests.
+- `domain/` is pure Kotlin. Measurement and estimator timestamps use elapsed-realtime nanoseconds; do not substitute wall-clock time or callback arrival time. Read `WIKI.md` before changing estimator or measurement semantics.
+- GNSS is the absolute speed source in both modes. `HANDHELD` ignores IMU; `FIXED` requires both linear-acceleration and rotation-vector sensors and must fall back to handheld if registration fails.
+- IMU may only bridge bounded short dropouts; it must not raise session maximum speed. Maximum candidates come from accepted raw GNSS, and stale/unreliable speed becomes unavailable rather than a synthetic zero or display floor.
+- Preserve the privacy boundary: the manifest has location permissions but no internet permission, and the app has no analytics or network dependency.
 
-## Build Commands
+## Tests
 
-### Using Gradle (Recommended)
-```bash
-# Build optimized release APK (requires keystore.properties for signing)
-./gradlew assembleRelease
+- Pure estimator/statistics behavior belongs in `app/src/test/.../domain`; repository races, retries, fallback, and callback generations belong in `SpeedRepositoryImplTest` using the existing platform fakes.
+- Compose tests instantiate `SpeedometerScreen` directly in `SpeedometerScreenTest`; keep action semantics/content descriptions stable or update those tests with intentional UI changes.
+- Global UI refresh throttling and graph interpolation are presentation-only. Every repository estimate must still update session statistics; never feed interpolated graph values back into acquisition or statistics.
+- Field accuracy is not established by JVM tests. `WIKI.md` defines the real-device validation corpus and acceptance targets for estimator tuning.
 
-# Build debug APK (faster, no signing required)
-./gradlew assembleDebug
+## Dependencies And Releases
 
-# Full build including both variants
-./gradlew build
-
-# Clean build artifacts
-./gradlew clean
-
-# Run lint checks
-./gradlew lint
-
-# Run unit tests (JVM-based)
-./gradlew test
-
-# Run instrumentation tests (requires connected device/emulator)
-./gradlew connectedAndroidTest
-
-# Install debug APK to connected device
-./gradlew installDebug
-```
-
-### Using Makefile (Convenience)
-```bash
-# Build release APK (default)
-make release
-
-# Build debug APK
-make debug
-
-# Build debug and install via ADB
-make install
-
-# Clean build artifacts
-make clean
-
-# View app-specific logs
-make log
-
-# Show all available commands
-make help
-```
-
-### APK Locations
-- **Release**: `app/build/outputs/apk/release/app-release.apk` when locally signed, otherwise `app-release-unsigned.apk`
-- **Debug**: `app/build/outputs/apk/debug/app-debug.apk`
-
-## Code Style Guidelines
-
-### Import Organization
-Order imports by package type:
-1. Standard Java libraries (`java.util.*`)
-2. Android framework (`android.*`)
-3. AndroidX libraries (`androidx.*`)
-4. Third-party libraries (`kotlinx.*`)
-
-Example:
-```kotlin
-import java.util.Locale
-import android.Manifest
-import android.annotation.SuppressLint
-import androidx.activity.ComponentActivity
-import androidx.compose.runtime.*
-import kotlinx.coroutines.launch
-```
-
-### Naming Conventions
-- **Classes**: PascalCase (`MainActivity`, `SpeedometerViewModel`)
-- **Functions**: camelCase (`updateLocation`, `startTracking`)
-- **Variables/Properties**: camelCase (`currentSpeedKmh`, `satelliteCount`)
-- **Constants**: UPPER_SNAKE_CASE (when added)
-- **Packages**: lowercase with dots (`com.mightykatun.speedometer.app`)
-
-### Type Usage & Null Safety
-- Use nullable types (`String?`, `Job?`) when appropriate
-- Apply safe calls (`?.`) and Elvis operator (`?:`) for null handling
-- Always check nulls before operations (`if (error != null)`)
-- Use Compose state functions (`mutableStateOf`, `mutableFloatStateOf`)
-
-### Error Handling Patterns
-- Use try-catch blocks for GPS operations and external calls
-- Store user-friendly error messages in ViewModel state
-- Include permission checks with descriptive error strings
-- Graceful degradation on permission denial
-
-```kotlin
-try {
-    locationManager.requestLocationUpdates(...)
-} catch (e: Exception) {
-    viewModel.onGpsError("Error starting GPS: ${e.message}")
-}
-```
-
-### Architecture Patterns
-- **Layered architecture**: Domain estimator/statistics code is pure Kotlin; Android clock and sensor/location adapters sit at platform boundaries; Compose and the ViewModel form the presentation layer.
-- **MVVM**: MainActivity handles UI/lifecycle and the ViewModel manages presentation state and session statistics.
-- **Lifecycle-aware**: Use `lifecycleScope.launch` for coroutines.
-- **Compose**: Use `@Composable` functions for UI components.
-- **Separation**: Private functions for internal logic, public for external interactions.
-
-## Project Structure
-
-```
-app/src/main/java/com/mightykatun/speedometer/app/
-├── AccuracyLevel.kt                  # Presentation uncertainty bands
-├── MainActivity.kt                    # Activity and UI composition
-├── SpeedRepositoryViewModel.kt        # Configuration-stable repository owner
-├── SpeedometerViewModel.kt            # State management and UI logic
-├── domain/                          # Business logic and clock contract
-│   ├── model/                         # Data models
-│   │   ├── GnssMeasurement.kt
-│   │   ├── EstimateQuality.kt
-│   │   ├── MaximumCandidate.kt
-│   │   ├── MotionMeasurement.kt
-│   │   ├── SpeedEstimate.kt
-│   │   ├── SpeedEstimatorConfig.kt
-│   │   ├── TrackingMode.kt
-│   │   ├── SpeedometerState.kt
-│   │   ├── SpeedTrendSample.kt
-│   │   ├── SpeedUnit.kt
-│   │   ├── SessionConfig.kt
-│   │   └── SessionStatistics.kt
-│   ├── util/                          # Utilities
-│   │   └── SpeedConverter.kt
-│   ├── SpeedEstimator.kt             # Confidence-aware GNSS/IMU fusion
-│   ├── SessionStatisticsTracker.kt      # Session tracking logic
-│   ├── MonotonicClock.kt              # Monotonic time abstraction
-│   └── time/
-│       └── AndroidElapsedRealtimeClock.kt # Android clock implementation
-├── data/                           # Data layer
-│   └── repository/                     # Repository pattern
-│       ├── RepositoryPlatform.kt          # Injectable Android platform boundaries
-│       ├── SpeedRepository.kt             # Speed update contract
-│       └── SpeedRepositoryImpl.kt         # Serialized GNSS/sensor acquisition
-├── di/                             # Dependency injection
-│   └── SpeedometerViewModelFactory.kt    # ViewModel factory
-```
-
-The manifest is at `app/src/main/AndroidManifest.xml`.
-
-## Key Dependencies & Versions
-
-- **Android Gradle Plugin**: 8.13.2
-- **Kotlin**: 1.9.24
-- **Compose Compiler**: 1.5.14
-- **Compose BOM**: 2023.08.00
-- **Target SDK**: 35, **Min SDK**: 24
-
-## Testing Guidelines
-
-### Unit Tests
-- Add JUnit/Kotlin test dependencies if adding unit tests
-- Test ViewModel logic and data transformation
-- Use `@Test` and standard JUnit assertions
-
-### Instrumentation Tests
-- Test UI interactions and Android-specific behavior
-- Use Compose testing utilities for UI tests
-- Run with `./gradlew connectedAndroidTest`
-
-## Signing & Release Builds
-
-The project supports automatic release signing via `keystore.properties` in project root:
-
-```properties
-keyAlias=your-key-alias
-keyPassword=your-key-password
-storeFile=path/to/keystore.jks
-storePassword=your-store-password
-```
-
-If `keystore.properties` doesn't exist, release builds will run unsigned for debugging.
-
-## Development Workflow
-
-1. **Make Changes**: Edit Kotlin files following the style guidelines
-2. **Run Lint**: `./gradlew lint` to check for issues
-3. **Build**: `make debug` for quick builds, `make release` for production
-4. **Test**: `make install` to test on connected device
-5. **Verify**: Check logs with `make log` if issues occur
-
-## Code Quality Notes
-
-- No custom lint rules configured - uses default Android lint
-- ProGuard enabled for release builds with default optimization
-- No external style configuration (.editorconfig, ktlint) present
-- Relies on default Android Studio/Kotlin formatting
-
-## Special Considerations
-
-- **Privacy-focused**: No internet permissions or tracking libraries
-- **Battery-conscious**: GPS and motion listeners are disconnected when the Activity stops outside configuration recreation
-- **Session-based**: All data resets when app goes to background
-- **Real-time**: Uses one HandlerThread for ordered GNSS and motion processing
-- **Accuracy-aware**: GNSS remains the absolute source in both tracking modes
-- **Mode-aware**: Handheld mode ignores motion sensors and fixed mode requires a rigid mount
-
-## Common Tasks
-
-### Adding New Features
-1. Add state variables to `SpeedometerViewModel.kt`
-2. Update UI in `@Composable` functions in `MainActivity.kt`
-3. Handle permissions if accessing new Android APIs
-
-### Adding Dependencies
-Add to `dependencies` block in `app/build.gradle.kts`:
-```kotlin
-implementation("group:artifact:version")
-```
-
-### Updating Android Manifest
-Add permissions, activities, or features in `app/src/main/AndroidManifest.xml`
+- Repositories are centralized in `settings.gradle.kts` with `FAIL_ON_PROJECT_REPOS`; adding a repository inside `app/build.gradle.kts` fails the build.
+- Gradle dependency verification metadata is checked in at `gradle/verification-metadata.xml`. Review and update checksums intentionally with dependency changes; do not bypass verification.
+- KAPT is currently unused. `kapt.incremental.apt=false` is a deliberate mitigation for CVE-2026-53914; do not re-enable its incremental cache when introducing annotation processing.
+- For releases, follow `RELEASING.md` and `.github/workflows/release.yml`. The `vX.Y.Z` tag must exactly match `versionName`; partial signing-secret configuration fails closed, while no signing secrets publishes a debug-signed `-test` prerelease.

@@ -3,6 +3,9 @@ package com.mightykatun.speedometer.app
 import com.mightykatun.speedometer.app.domain.SessionStatisticsTracker
 import com.mightykatun.speedometer.app.domain.MonotonicClock
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
+import com.mightykatun.speedometer.app.domain.model.MaximumCandidate
+import com.mightykatun.speedometer.app.domain.model.MaximumCandidateChange
+import com.mightykatun.speedometer.app.domain.model.RefreshRate
 import com.mightykatun.speedometer.app.domain.model.SessionConfig
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import org.junit.Assert.assertEquals
@@ -58,7 +61,7 @@ class SpeedometerViewModelTest {
         viewModel.onSessionStart()
 
         viewModel.onSpeedEstimateReceived(estimate(5.0, EstimateQuality.TRACKING, 0.2, 1_000_000_000L))
-        viewModel.onSpeedEstimateReceived(estimate(5.0, EstimateQuality.TRACKING, 0.8, 1_500_000_000L))
+        viewModel.onSpeedEstimateReceived(estimate(5.0, EstimateQuality.TRACKING, 0.8, 2_000_000_000L))
         assertEquals(2.88f, viewModel.state.speedAccuracyKmh!!, 0.001f)
     }
 
@@ -89,7 +92,7 @@ class SpeedometerViewModelTest {
     }
 
     @Test
-    fun `speed trend retains raw updates within a bounded window and clears with the session`() {
+    fun `speed trend retains graph targets within a bounded window and clears with the session`() {
         whenever(clock.elapsedRealtimeMillis()).thenReturn(0L)
         viewModel.onSessionStart()
         viewModel.onSpeedEstimateReceived(
@@ -128,15 +131,107 @@ class SpeedometerViewModelTest {
         assertEquals(emptyList<Any>(), viewModel.state.speedTrend)
     }
 
+    @Test
+    fun `speed trend records availability transitions without sampling delay`() {
+        whenever(clock.elapsedRealtimeMillis()).thenReturn(0L)
+        viewModel.onSessionStart()
+        viewModel.onSpeedEstimateReceived(
+            estimate(10.0, EstimateQuality.TRACKING, timestampNanos = 1_000_000_000L)
+        )
+        viewModel.onSpeedEstimateReceived(
+            estimate(null, EstimateQuality.UNAVAILABLE, timestampNanos = 1_050_000_000L)
+        )
+        viewModel.onSpeedEstimateReceived(
+            estimate(11.0, EstimateQuality.TRACKING, timestampNanos = 1_075_000_000L)
+        )
+
+        assertEquals(listOf(36f, null, 39.6f), viewModel.state.speedTrend.map { it.speedKmh })
+    }
+
+    @Test
+    fun `selected refresh publishes measurement and satellite state together`() {
+        whenever(clock.elapsedRealtimeMillis()).thenReturn(0L)
+        viewModel.onSessionStart()
+        viewModel.onRefreshRateChanged(RefreshRate.HALF_SECOND)
+
+        viewModel.onSpeedEstimateReceived(
+            estimate(10.0, EstimateQuality.TRACKING, 0.2, 1_000_000_000L)
+        )
+        viewModel.onSatelliteCountReceived(5)
+        viewModel.onSpeedEstimateReceived(
+            estimate(20.0, EstimateQuality.TRACKING, 0.8, 1_400_000_000L)
+        )
+
+        assertEquals(36f, viewModel.state.currentSpeedKmh!!, 0.001f)
+        assertEquals(0.72f, viewModel.state.speedAccuracyKmh!!, 0.001f)
+        assertEquals(0, viewModel.state.satelliteCount)
+        assertEquals(listOf(36f), viewModel.state.speedTrend.map { it.speedKmh })
+
+        viewModel.onSpeedEstimateReceived(
+            estimate(30.0, EstimateQuality.TRACKING, 0.4, 1_500_000_000L)
+        )
+
+        assertEquals(108f, viewModel.state.currentSpeedKmh!!, 0.001f)
+        assertEquals(1.44f, viewModel.state.speedAccuracyKmh!!, 0.001f)
+        assertEquals(5, viewModel.state.satelliteCount)
+        assertEquals(5, viewModel.state.maxSatelliteCount)
+        assertEquals(listOf(36f, 108f), viewModel.state.speedTrend.map { it.speedKmh })
+    }
+
+    @Test
+    fun `throttled presentation does not drop maximum candidates`() {
+        whenever(clock.elapsedRealtimeMillis()).thenReturn(0L)
+        viewModel.onSessionStart()
+        viewModel.onRefreshRateChanged(RefreshRate.HALF_SECOND)
+        viewModel.onSpeedEstimateReceived(
+            estimate(
+                speed = 10.0,
+                quality = EstimateQuality.TRACKING,
+                timestampNanos = 10_000_000_000L,
+                warmupStartTimestampNanos = 1_000_000_000L
+            )
+        )
+        viewModel.onSpeedEstimateReceived(
+            estimate(
+                speed = 20.0,
+                quality = EstimateQuality.TRACKING,
+                timestampNanos = 10_400_000_000L,
+                warmupStartTimestampNanos = 1_000_000_000L,
+                candidateChanges = listOf(
+                    MaximumCandidateChange.Upsert(
+                        MaximumCandidate(1L, 50.0, 4_000_000_000L, 3)
+                    )
+                )
+            )
+        )
+
+        assertEquals(0f, viewModel.state.maxSpeedKmh, 0.001f)
+
+        viewModel.onSpeedEstimateReceived(
+            estimate(
+                speed = 30.0,
+                quality = EstimateQuality.TRACKING,
+                timestampNanos = 10_500_000_000L,
+                warmupStartTimestampNanos = 1_000_000_000L
+            )
+        )
+
+        assertEquals(180f, viewModel.state.maxSpeedKmh, 0.001f)
+    }
+
     private fun estimate(
         speed: Double?,
         quality: EstimateQuality,
         uncertainty: Double = 0.2,
-        timestampNanos: Long = 1L
+        timestampNanos: Long = 1L,
+        warmupStartTimestampNanos: Long = 0L,
+        candidateChanges: List<MaximumCandidateChange> = emptyList()
     ) = SpeedEstimate(
         speedMetersPerSecond = speed,
         uncertaintyMetersPerSecond = uncertainty,
         quality = quality,
-        timestampNanos = timestampNanos
+        timestampNanos = timestampNanos,
+        maximumWarmupStartTimestampNanos = warmupStartTimestampNanos,
+        maximumCandidateChanges = candidateChanges
     )
 }

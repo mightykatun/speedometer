@@ -14,7 +14,8 @@ Download and install the APK from [Releases](https://github.com/mightykatun/spee
 
 * **Accuracy-aware Speed:** GNSS speed is filtered by its reported uncertainty without hiding valid low-speed readings. The display shows its current uncertainty in km/h, mph, knots, or m/s.
 * **Tracking Modes:** `gnss` uses satellite speed only. `gnss+imu` adds bounded prediction for a rigidly mounted phone.
-* **Speed Trend:** A minimal smoothed scrolling tail shows the most recent 30 seconds without axes or visual clutter.
+* **Speed Trend:** A live-smoothed scrolling tail shows the most recent 30 seconds without exposing discrete refresh steps.
+* **Refresh Control:** The complete measurement UI refreshes every 0.5, 1, or 2 seconds while acquisition and statistics continue at full rate.
 * **Satellite Status:** Real-time GNSS satellite count with a red/green status indicator.
 * **Session Statistics:**
     * **Top Speed:** Tracks trusted raw GNSS maxima; inertial prediction never increases it.
