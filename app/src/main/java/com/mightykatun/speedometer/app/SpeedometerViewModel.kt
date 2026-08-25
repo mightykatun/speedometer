@@ -17,6 +17,8 @@ class SpeedometerViewModel(
 
     private var sessionActive = false
     private var gpsErrorActive = false
+    private var waitingForFreshGnss = false
+    private var freshGnssReceived = false
     private var refreshRate = RefreshRate.ONE_SECOND
     private var latestPresentation: PendingPresentation? = null
     private var latestMaxSpeedKmh = 0f
@@ -50,8 +52,14 @@ class SpeedometerViewModel(
                 ?.let { (it * 3.6).toFloat() },
             quality = estimate.quality
         )
-        if (latestPresentation?.timestampNanos?.let { candidate.timestampNanos >= it } != false) {
+        val acceptedForPresentation = latestPresentation?.timestampNanos
+            ?.let { candidate.timestampNanos >= it } != false
+        if (acceptedForPresentation) {
             latestPresentation = candidate
+        }
+        if (freshGnssReceived && acceptedForPresentation) {
+            freshGnssReceived = false
+            waitingForFreshGnss = false
         }
         publishPresentationIfDue()
     }
@@ -61,6 +69,9 @@ class SpeedometerViewModel(
         latestMaxSpeedKmh = stats.maxSpeedKmh
         latestSatelliteCount = stats.currentSatellites
         latestMaxSatelliteCount = stats.maxSatellites
+        if (satelliteCount == 0 && state.satelliteCount != 0) {
+            state = state.copy(satelliteCount = 0)
+        }
     }
 
     fun onRefreshRateChanged(refreshRate: RefreshRate) {
@@ -83,6 +94,8 @@ class SpeedometerViewModel(
         warningMessage = null
         signalMessage = null
         gpsErrorActive = false
+        waitingForFreshGnss = false
+        freshGnssReceived = false
         latestPresentation = null
         latestMaxSpeedKmh = 0f
         latestSatelliteCount = 0
@@ -92,6 +105,8 @@ class SpeedometerViewModel(
 
     fun onError(message: String) {
         gpsErrorActive = false
+        waitingForFreshGnss = false
+        freshGnssReceived = false
         signalMessage = null
         errorMessage = message
     }
@@ -101,6 +116,18 @@ class SpeedometerViewModel(
         if (message == GPS_PROVIDER_DISABLED_MESSAGE) {
             errorMessage = null
             signalMessage = message
+            waitingForFreshGnss = true
+            freshGnssReceived = false
+            val stats = sessionTracker.updateSatelliteCount(0)
+            latestMaxSpeedKmh = stats.maxSpeedKmh
+            latestSatelliteCount = stats.currentSatellites
+            latestMaxSatelliteCount = stats.maxSatellites
+            state = state.copy(
+                currentSpeedKmh = null,
+                speedAccuracyKmh = null,
+                estimateQuality = EstimateQuality.UNAVAILABLE,
+                satelliteCount = 0
+            )
         } else {
             signalMessage = null
             errorMessage = message
@@ -111,7 +138,15 @@ class SpeedometerViewModel(
         warningMessage = message
     }
 
+    fun onGpsProviderEnabled() {
+        if (signalMessage == GPS_PROVIDER_DISABLED_MESSAGE) {
+            gpsErrorActive = false
+            signalMessage = null
+        }
+    }
+
     fun onGpsAvailable() {
+        if (waitingForFreshGnss) freshGnssReceived = true
         if (gpsErrorActive) {
             gpsErrorActive = false
             errorMessage = null
@@ -120,7 +155,16 @@ class SpeedometerViewModel(
     }
 
     private fun publishPresentationIfDue(force: Boolean = false) {
-        val latest = latestPresentation ?: return
+        val measured = latestPresentation ?: return
+        val latest = if (waitingForFreshGnss) {
+            measured.copy(
+                currentSpeedKmh = null,
+                speedAccuracyKmh = null,
+                quality = EstimateQuality.UNAVAILABLE
+            )
+        } else {
+            measured
+        }
         val availabilityChanged = (state.currentSpeedKmh == null) != (latest.currentSpeedKmh == null)
         val unavailableBoundary = state.estimateQuality != latest.quality &&
             (state.estimateQuality == EstimateQuality.UNAVAILABLE ||

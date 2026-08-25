@@ -16,7 +16,7 @@ The app remains a single-screen HUD with no navigation graph.
 
 ### Top Left
 
-- Shows the latest satellites reported as used-in-fix by Android's GNSS status callback
+- Shows recent satellites reported as used-in-fix by Android's GNSS status callback; stale evidence returns to zero
 - GNSS status is green at three or more satellites and red below three
 - Satellite count is status information, not a speed-accuracy measurement
 
@@ -45,7 +45,7 @@ Estimate states:
 | Tracking | Number available | Recent GNSS correction and bounded uncertainty |
 | Estimated | Number available | Number is available but uncertainty or fix age is elevated |
 | Acquiring | `--` | No valid GNSS speed seed or first IMU sample yet |
-| Speed unavailable | `--` | Last defensible estimate is too old or too uncertain |
+| Speed unavailable | `--` | Last defensible estimate is too old or too uncertain; reports `no signal` only when the recent satellite count is zero |
 
 ### Bottom
 
@@ -95,9 +95,9 @@ TYPE_ROTATION_VECTOR ──────────┘             │
 
 `SpeedRepositoryImpl` serializes location and sensor callbacks on one `HandlerThread`. A 10 Hz tick keeps stale-data state current, while accepted location callbacks may emit immediately. Starting and stopping are idempotent. Listeners remain active across configuration recreation and are removed when `onStop` represents real backgrounding.
 
-Refresh selection is presentation-only. Repository estimates and session statistics continue at 10 Hz; speed, uncertainty, quality, maxima, satellites, and the graph publish together at the selected UI interval. Unavailable/recovered speed transitions publish immediately, and interpolated graph values never feed the estimator or statistics.
+Refresh selection is presentation-only. Repository estimates and session statistics continue at 10 Hz; speed, uncertainty, quality, maxima, satellites, and the graph publish together at the selected UI interval. Unavailable/recovered speed transitions and satellite loss to zero publish immediately, and interpolated graph values never feed the estimator or statistics.
 
-GNSS satellite callbacks update the displayed count and timestamped satellite evidence for subsequent fixes. They never replay a cached `Location` and never refresh fix age.
+GNSS satellite callbacks update the displayed count and timestamped satellite evidence for subsequent fixes. Evidence and the displayed count expire after two seconds without a fresh callback. They never replay a cached `Location` and never refresh fix age.
 
 ## Measurement Semantics
 
@@ -183,7 +183,7 @@ No watchdog injects fake zero readings.
 | Condition | Behavior |
 |---|---|
 | Fine location denied | Explain that precise location is required |
-| GPS provider disabled | Show `gps provider disabled` in the inline unavailable-status position |
+| GPS provider disabled | Show `gps provider disabled` inline until the provider is enabled, then wait for a fresh speed-bearing fix |
 | Speed absent or invalid | Ignore the measurement; never synthesize zero |
 | Speed uncertainty too poor | Preserve the prior estimate until it becomes stale |
 | IMU sensors absent | Disable `gnss+imu` |

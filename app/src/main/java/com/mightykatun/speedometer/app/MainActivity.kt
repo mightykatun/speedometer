@@ -223,6 +223,7 @@ class MainActivity : ComponentActivity() {
             trackingMode = preferredTrackingMode,
             onEstimate = viewModel::onSpeedEstimateReceived,
             onSatelliteCount = viewModel::onSatelliteCountReceived,
+            onGpsProviderEnabled = viewModel::onGpsProviderEnabled,
             onGnssAvailable = viewModel::onGpsAvailable,
             onPermissionRequired = {
                 permissionIssue = currentPermissionIssue()
@@ -342,6 +343,11 @@ fun SpeedometerScreen(
     } else {
         EstimateQuality.UNAVAILABLE
     }
+    val unavailableText = signalMessage ?: if (displayedSatelliteCount == 0) {
+        "no signal"
+    } else {
+        "speed unavailable"
+    }
     val statusColor = if (displayedSatelliteCount >= 3) Color.Green else Color.Red
     val currentSpeed = displayedSpeedKmh?.let(speedUnit::fromKilometersPerHour)
     val currentAccuracy = state.speedAccuracyKmh?.let(speedUnit::fromKilometersPerHour)
@@ -425,48 +431,53 @@ fun SpeedometerScreen(
                     verticalAlignment = Alignment.Top
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Row(
+                        Box(
                             modifier = Modifier.height(48.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                            contentAlignment = Alignment.BottomStart
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(10.dp)
-                                    .background(
-                                        if (compactWarning != null) Color(0xFFFFA000) else statusColor,
-                                        shape = androidx.compose.foundation.shape.CircleShape
+                            Row(
+                                modifier = Modifier.padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .background(
+                                            if (compactWarning != null) Color(0xFFFFA000) else statusColor,
+                                            shape = androidx.compose.foundation.shape.CircleShape
+                                        )
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                if (compactWarning != null) {
+                                    Text(
+                                        text = compactWarning,
+                                        color = primaryColor,
+                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.semantics {
+                                            contentDescription = compactWarning
+                                        }
                                     )
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            if (compactWarning != null) {
-                                Text(
-                                    text = compactWarning,
-                                    color = primaryColor,
-                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 11.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.semantics {
-                                        contentDescription = compactWarning
-                                    }
-                                )
-                            } else {
-                                Text(
-                                    text = "satellites: ",
-                                    color = labelColor,
-                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                    fontSize = 14.sp,
-                                    maxLines = 1
-                                )
-                                Text(
-                                    text = "$displayedSatelliteCount",
-                                    color = primaryColor,
-                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 14.sp,
-                                    maxLines = 1
-                                )
+                                } else {
+                                    Text(
+                                        text = "satellites: ",
+                                        color = labelColor,
+                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                        fontSize = 14.sp,
+                                        maxLines = 1
+                                    )
+                                    Text(
+                                        text = "$displayedSatelliteCount",
+                                        color = primaryColor,
+                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp,
+                                        maxLines = 1
+                                    )
+                                }
                             }
                         }
                         if (compactActions) {
@@ -480,7 +491,7 @@ fun SpeedometerScreen(
                                     accuracy = currentAccuracy,
                                     unit = speedUnit.label,
                                     isInPipMode = false,
-                                    unavailableText = signalMessage ?: "no signal"
+                                    unavailableText = unavailableText
                                 )
                             }
                         }
@@ -611,7 +622,7 @@ fun SpeedometerScreen(
                         accuracy = currentAccuracy,
                         unit = speedUnit.label,
                         isInPipMode = isInPipMode,
-                        unavailableText = signalMessage ?: "no signal"
+                        unavailableText = unavailableText
                     )
                 }
             }
@@ -762,7 +773,11 @@ private fun AccuracyIndicator(
         EstimateQuality.UNAVAILABLE -> unavailableText
     }
     val accessibilityText = when (quality) {
-        EstimateQuality.UNAVAILABLE -> "$unavailableText, speed unavailable"
+        EstimateQuality.UNAVAILABLE -> if (unavailableText == "speed unavailable") {
+            unavailableText
+        } else {
+            "$unavailableText, speed unavailable"
+        }
         EstimateQuality.TRACKING, EstimateQuality.DEGRADED ->
             "$text, ${level.name.lowercase(Locale.US)} accuracy"
         EstimateQuality.ACQUIRING -> "Acquiring speed"

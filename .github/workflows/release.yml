@@ -47,8 +47,29 @@ jobs:
           git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"
           test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
           version_name="$(perl -ne 'print $1 if /versionName = "([^\"]+)"/' app/build.gradle.kts)"
+          version_code="$(perl -ne 'print $1 if /versionCode = ([0-9]+)/' app/build.gradle.kts)"
           test -n "$version_name"
+          test -n "$version_code"
           test "$RELEASE_TAG" = "v$version_name"
+          max_previous_version_code=0
+          max_previous_tag=""
+          while IFS= read -r tag; do
+            if test "$tag" = "$RELEASE_TAG"; then
+              continue
+            fi
+            previous_version_code="$(
+              git show "$tag:app/build.gradle.kts" |
+                perl -ne 'print $1 if /versionCode = ([0-9]+)/'
+            )"
+            test -n "$previous_version_code"
+            if test "$previous_version_code" -gt "$max_previous_version_code"; then
+              max_previous_version_code="$previous_version_code"
+              max_previous_tag="$tag"
+            fi
+          done < <(git tag --list 'v*')
+          if test -n "$max_previous_tag"; then
+            test "$version_code" -gt "$max_previous_version_code"
+          fi
 
       - name: Set up Java
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -116,8 +137,6 @@ jobs:
       contents: read
       id-token: write
       attestations: write
-    outputs:
-      prerelease: ${{ steps.sign.outputs.prerelease }}
     steps:
       - name: Download unsigned build inputs
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
@@ -132,8 +151,7 @@ jobs:
         shell: bash
         run: sdkmanager "build-tools;35.0.0"
 
-      - name: Select signing mode and sign APK
-        id: sign
+      - name: Sign APK
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
@@ -156,36 +174,30 @@ jobs:
             fi
           done
 
-          if test "$configured" -eq 0; then
-            echo "No signing secrets found; creating a debug-signed test prerelease."
-            cp inputs/app-debug.apk "dist/speedometer-${RELEASE_TAG}-test.apk"
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          elif test "$configured" -eq 5; then
-            trap 'rm -f release-key.jks' EXIT
-            printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > release-key.jks
-            "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
-              --ks release-key.jks \
-              --ks-key-alias "$RELEASE_KEY_ALIAS" \
-              --ks-pass env:RELEASE_STORE_PASSWORD \
-              --key-pass env:RELEASE_KEY_PASSWORD \
-              --out "dist/speedometer-${RELEASE_TAG}.apk" \
-              inputs/app-release-unsigned.apk
-            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
-              --verbose \
-              "dist/speedometer-${RELEASE_TAG}.apk"
-            actual_cert_sha256="$(
-              "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs \
-                "dist/speedometer-${RELEASE_TAG}.apk" |
-                perl -ne 'print lc($1) if /Signer #1 certificate SHA-256 digest: ([0-9a-fA-F]+)/'
-            )"
-            expected_cert_sha256="$(printf '%s' "$RELEASE_CERT_SHA256" | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
-            test -n "$actual_cert_sha256"
-            test "$actual_cert_sha256" = "$expected_cert_sha256"
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "Signing is partially configured; set all five release values or remove them all." >&2
+          if test "$configured" -ne 5; then
+            echo "Stable release signing requires all five release-signing environment secrets." >&2
             exit 1
           fi
+          trap 'rm -f release-key.jks' EXIT
+          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > release-key.jks
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
+            --ks release-key.jks \
+            --ks-key-alias "$RELEASE_KEY_ALIAS" \
+            --ks-pass env:RELEASE_STORE_PASSWORD \
+            --key-pass env:RELEASE_KEY_PASSWORD \
+            --out "dist/speedometer-${RELEASE_TAG}.apk" \
+            inputs/app-release-unsigned.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
+            --verbose \
+            "dist/speedometer-${RELEASE_TAG}.apk"
+          actual_cert_sha256="$(
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs \
+              "dist/speedometer-${RELEASE_TAG}.apk" |
+              perl -ne 'print lc($1) if /Signer #1 certificate SHA-256 digest: ([0-9a-fA-F]+)/'
+          )"
+          expected_cert_sha256="$(printf '%s' "$RELEASE_CERT_SHA256" | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')"
+          test -n "$actual_cert_sha256"
+          test "$actual_cert_sha256" = "$expected_cert_sha256"
 
       - name: Package release assets
         shell: bash
@@ -230,9 +242,6 @@ jobs:
           set -euo pipefail
           (cd dist && sha256sum --check SHA256SUMS.txt)
           flags=(--verify-tag --generate-notes --title "Speedometer $RELEASE_TAG")
-          if test "${{ needs.sign.outputs.prerelease }}" = "true"; then
-            flags+=(--prerelease)
-          fi
           gh release create \
             "$RELEASE_TAG" \
             dist/*.apk \

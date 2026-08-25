@@ -14,8 +14,8 @@ android {
         applicationId = "com.mightykatun.speedometer.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 12
-        versionName = "1.4.3"
+        versionCode = 13
+        versionName = "1.4.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -104,12 +104,19 @@ dependencies {
 tasks.register("stageReleaseSbomInputs") {
     dependsOn("assembleRelease")
     val outputDirectory = layout.buildDirectory.dir("sbom-inputs")
+    val releaseRuntimeClasspath = configurations.getByName("releaseRuntimeClasspath")
+    val localSigningConfigured = rootProject.file("keystore.properties").exists()
+    val apkName = if (localSigningConfigured) "app-release.apk" else "app-release-unsigned.apk"
+    val releaseApk = layout.buildDirectory.file("outputs/apk/release/$apkName")
+    inputs.file(releaseApk)
+    inputs.files(releaseRuntimeClasspath)
+    inputs.property("localSigningConfigured", localSigningConfigured)
     outputs.dir(outputDirectory)
     doLast {
         val output = outputDirectory.get().asFile
         output.deleteRecursively()
         output.mkdirs()
-        configurations.getByName("releaseRuntimeClasspath")
+        releaseRuntimeClasspath
             .resolvedConfiguration
             .resolvedArtifacts
             .forEach { artifact ->
@@ -132,7 +139,7 @@ tasks.register("stageReleaseSbomInputs") {
                 )
             }
         copy {
-            from(layout.buildDirectory.file("outputs/apk/release/app-release-unsigned.apk"))
+            from(releaseApk)
             into(output.resolve("application"))
         }
     }

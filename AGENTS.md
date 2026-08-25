@@ -9,7 +9,7 @@
 - The only CI workflow is the tag/manual release workflow; there is no pull-request gate. Its build command is `./gradlew --no-build-cache clean test lint assembleDebug stageReleaseSbomInputs`.
 - `make install` builds the debug APK and runs `adb install -r`; `make log` filters logcat to `MainActivity` and `GnssStatus`.
 - Without root `keystore.properties`, `assembleRelease` produces `app/build/outputs/apk/release/app-release-unsigned.apk`. `make release` still prints the signed filename, so do not trust that message when no keystore is configured.
-- `stageReleaseSbomInputs` is release-only: it depends on `assembleRelease`, copies the unsigned APK, and stages exact `releaseRuntimeClasspath` artifacts for Syft.
+- `stageReleaseSbomInputs` is release-only: it depends on `assembleRelease`, copies the locally signed APK when `keystore.properties` exists or the unsigned APK otherwise, and stages exact `releaseRuntimeClasspath` artifacts for Syft.
 
 ## Architecture And Invariants
 
@@ -35,4 +35,4 @@
 - Repositories are centralized in `settings.gradle.kts` with `FAIL_ON_PROJECT_REPOS`; adding a repository inside `app/build.gradle.kts` fails the build.
 - Gradle dependency verification metadata is checked in at `gradle/verification-metadata.xml`. Review and update checksums intentionally with dependency changes; do not bypass verification.
 - KAPT is currently unused. `kapt.incremental.apt=false` is a deliberate mitigation for CVE-2026-53914; do not re-enable its incremental cache when introducing annotation processing.
-- For releases, follow `RELEASING.md` and `.github/workflows/release.yml`. The `vX.Y.Z` tag must exactly match `versionName`; partial signing-secret configuration fails closed, while no signing secrets publishes a debug-signed `-test` prerelease.
+- For releases, follow `RELEASING.md` and `.github/workflows/release.yml`. The `vX.Y.Z` tag must exactly match `versionName`, `versionCode` must increase, and all five persistent signing secrets are mandatory; missing, partial, or mismatched signing configuration fails closed.

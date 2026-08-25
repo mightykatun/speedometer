@@ -172,4 +172,37 @@ class SpeedometerScreenTest {
         composeRule.onNodeWithText("Unable to monitor GNSS status").assertIsDisplayed()
         composeRule.onNodeWithText("reset").assertDoesNotExist()
     }
+
+    @Test
+    fun unavailableSpeedWithSatellitesDoesNotClaimNoSignal() {
+        composeRule.setContent {
+            SpeedometerScreen(
+                state = SpeedometerState(
+                    estimateQuality = EstimateQuality.UNAVAILABLE,
+                    satelliteCount = 6
+                ),
+                error = null,
+                warning = null,
+                signalMessage = null,
+                isInPipMode = false,
+                speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
+                trackingMode = TrackingMode.HANDHELD,
+                refreshRate = RefreshRate.ONE_SECOND,
+                supportsFixedMode = true,
+                supportsPip = false,
+                permissionMessage = null,
+                onSpeedUnitClick = {},
+                onTrackingModeChange = {},
+                onRefreshRateChange = {},
+                onReset = {},
+                onEnterPip = {},
+                onRequestPermission = {},
+                onOpenSettings = {}
+            )
+        }
+
+        composeRule.onNodeWithText("6").assertIsDisplayed()
+        composeRule.onNodeWithText("speed unavailable").assertIsDisplayed()
+        composeRule.onNodeWithText("no signal").assertDoesNotExist()
+    }
 }

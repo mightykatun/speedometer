@@ -43,17 +43,68 @@ class SpeedometerViewModelTest {
     }
 
     @Test
-    fun `generic estimator ticks do not clear provider disabled status`() {
+    fun `provider recovery waits for a fresh GNSS measurement`() {
         whenever(clock.elapsedRealtimeMillis()).thenReturn(0L, 1000L)
         viewModel.onSessionStart()
+        viewModel.onSatelliteCountReceived(6)
+        viewModel.onSpeedEstimateReceived(
+            estimate(12.0, EstimateQuality.TRACKING, timestampNanos = 10_000_000_000L)
+        )
+
         viewModel.onGpsError("gps provider disabled")
 
-        viewModel.onSpeedEstimateReceived(estimate(null, EstimateQuality.ACQUIRING))
+        viewModel.onSpeedEstimateReceived(
+            estimate(12.0, EstimateQuality.TRACKING, timestampNanos = 12_000_000_000L)
+        )
 
         assertNull(viewModel.errorMessage)
         assertEquals("gps provider disabled", viewModel.signalMessage)
-        viewModel.onGpsAvailable()
+        assertNull(viewModel.state.currentSpeedKmh)
+        assertEquals(EstimateQuality.UNAVAILABLE, viewModel.state.estimateQuality)
+        assertEquals(0, viewModel.state.satelliteCount)
+
+        viewModel.onRefreshRateChanged(RefreshRate.HALF_SECOND)
+        assertNull(viewModel.state.currentSpeedKmh)
+
+        viewModel.onGpsProviderEnabled()
+        viewModel.onRefreshRateChanged(RefreshRate.TWO_SECONDS)
+        assertNull(viewModel.state.currentSpeedKmh)
+        viewModel.onSpeedEstimateReceived(
+            estimate(12.0, EstimateQuality.TRACKING, timestampNanos = 11_000_000_000L)
+        )
+
         assertNull(viewModel.signalMessage)
+        assertNull(viewModel.state.currentSpeedKmh)
+
+        viewModel.onGpsAvailable()
+        viewModel.onRefreshRateChanged(RefreshRate.ONE_SECOND)
+        assertNull(viewModel.state.currentSpeedKmh)
+        viewModel.onSpeedEstimateReceived(
+            estimate(12.0, EstimateQuality.TRACKING, timestampNanos = 11_500_000_000L)
+        )
+        assertNull(viewModel.state.currentSpeedKmh)
+        viewModel.onSpeedEstimateReceived(
+            estimate(12.0, EstimateQuality.TRACKING, timestampNanos = 13_000_000_000L)
+        )
+
+        assertEquals(43.2f, viewModel.state.currentSpeedKmh!!, 0.001f)
+    }
+
+    @Test
+    fun `satellite loss publishes immediately without clearing session maximum`() {
+        whenever(clock.elapsedRealtimeMillis()).thenReturn(0L)
+        viewModel.onSessionStart()
+        viewModel.onRefreshRateChanged(RefreshRate.TWO_SECONDS)
+        viewModel.onSatelliteCountReceived(6)
+        viewModel.onSpeedEstimateReceived(
+            estimate(12.0, EstimateQuality.TRACKING, timestampNanos = 1_000_000_000L)
+        )
+        assertEquals(6, viewModel.state.satelliteCount)
+
+        viewModel.onSatelliteCountReceived(0)
+
+        assertEquals(0, viewModel.state.satelliteCount)
+        assertEquals(6, viewModel.state.maxSatelliteCount)
     }
 
     @Test

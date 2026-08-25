@@ -56,6 +56,7 @@ class SpeedRepositoryImpl private constructor(
         trackingMode: TrackingMode,
         onEstimate: (SpeedEstimate) -> Unit,
         onSatelliteCount: (Int) -> Unit,
+        onGpsProviderEnabled: () -> Unit,
         onGnssAvailable: () -> Unit,
         onPermissionRequired: () -> Unit,
         onError: (String) -> Unit,
@@ -64,6 +65,7 @@ class SpeedRepositoryImpl private constructor(
         val callbacks = Callbacks(
             onEstimate,
             onSatelliteCount,
+            onGpsProviderEnabled,
             onGnssAvailable,
             onPermissionRequired,
             onError,
@@ -158,29 +160,38 @@ class SpeedRepositoryImpl private constructor(
         private var sensorsRegistered = false
         private var locationRegistered = false
         private var gnssRegistered = false
+        private var gpsProviderDisabled = false
         private var satelliteEvidence: SatelliteEvidence? = null
 
         private val estimateTick = object : Runnable {
             override fun run() {
                 if (!isCurrentStarted()) return
-                emitEstimate(estimator.snapshotAt(worker.elapsedRealtimeNanos()))
+                val timestampNanos = worker.elapsedRealtimeNanos()
+                expireSatelliteEvidence(timestampNanos)
+                emitEstimate(estimator.snapshotAt(timestampNanos))
                 worker.postDelayed(this, OUTPUT_PERIOD_MILLISECONDS)
             }
         }
 
         private val locationListener = object : LocationListener {
             override fun onLocationChanged(location: Location) {
-                if (!isCurrent()) return
+                if (!isCurrent() || gpsProviderDisabled) return
                 val measurement = createMeasurement(location)
                 estimator.ingestGnssMeasurement(measurement)
-                if (measurement.speedMetersPerSecond != null) emitGnssAvailable()
                 emitEstimate(estimator.snapshotAt(location.elapsedRealtimeNanos))
+                if (measurement.speedMetersPerSecond != null) emitGnssAvailable()
             }
 
-            override fun onProviderEnabled(provider: String) = Unit
+            override fun onProviderEnabled(provider: String) {
+                if (provider == LocationManager.GPS_PROVIDER && isCurrent()) {
+                    gpsProviderDisabled = false
+                    emitGpsProviderEnabled()
+                }
+            }
 
             override fun onProviderDisabled(provider: String) {
                 if (provider == LocationManager.GPS_PROVIDER && isCurrent()) {
+                    gpsProviderDisabled = true
                     clearSatelliteEvidence()
                     emitError("gps provider disabled")
                 }
@@ -191,12 +202,19 @@ class SpeedRepositoryImpl private constructor(
         }
 
         private val gnssCallback = object : GnssStatus.Callback() {
+            override fun onStarted() {
+                if (isCurrent()) {
+                    gpsProviderDisabled = false
+                    emitGpsProviderEnabled()
+                }
+            }
+
             override fun onStopped() {
                 if (isCurrent()) clearSatelliteEvidence()
             }
 
             override fun onSatelliteStatusChanged(status: GnssStatus) {
-                if (!isCurrent()) return
+                if (!isCurrent() || gpsProviderDisabled) return
                 val count = (0 until status.satelliteCount).count(status::usedInFix)
                 satelliteEvidence = SatelliteEvidence(count, worker.elapsedRealtimeNanos())
                 emitSatelliteCount(count)
@@ -251,6 +269,7 @@ class SpeedRepositoryImpl private constructor(
             }
             gnssRegistered = false
             locationRegistered = false
+            gpsProviderDisabled = false
             satelliteEvidence = null
         }
 
@@ -356,6 +375,16 @@ class SpeedRepositoryImpl private constructor(
             emitSatelliteCount(0)
         }
 
+        private fun expireSatelliteEvidence(timestampNanos: Long) {
+            val evidence = satelliteEvidence ?: return
+            if (timestampNanos >= evidence.observedAtElapsedRealtimeNanos &&
+                timestampNanos - evidence.observedAtElapsedRealtimeNanos >
+                MAX_SATELLITE_EVIDENCE_AGE_NANOS
+            ) {
+                clearSatelliteEvidence()
+            }
+        }
+
         private fun createMeasurement(location: Location): GnssMeasurement {
             val speed = location.speed.toDouble().takeIf {
                 location.hasSpeed() && it.isFinite() && it >= 0.0
@@ -454,6 +483,13 @@ class SpeedRepositoryImpl private constructor(
             }
         }
 
+        private fun emitGpsProviderEnabled() {
+            val target = delivery
+            mainDispatcher.post {
+                if (target.valid) target.callbacks.onGpsProviderEnabled()
+            }
+        }
+
         private fun emitGnssAvailable() {
             val target = delivery
             mainDispatcher.post {
@@ -491,6 +527,7 @@ class SpeedRepositoryImpl private constructor(
     private data class Callbacks(
         val onEstimate: (SpeedEstimate) -> Unit,
         val onSatelliteCount: (Int) -> Unit,
+        val onGpsProviderEnabled: () -> Unit,
         val onGnssAvailable: () -> Unit,
         val onPermissionRequired: () -> Unit,
         val onError: (String) -> Unit,

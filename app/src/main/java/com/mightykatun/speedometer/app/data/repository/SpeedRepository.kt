@@ -10,6 +10,7 @@ interface SpeedRepository {
         trackingMode: TrackingMode,
         onEstimate: (SpeedEstimate) -> Unit,
         onSatelliteCount: (Int) -> Unit,
+        onGpsProviderEnabled: () -> Unit,
         onGnssAvailable: () -> Unit,
         onPermissionRequired: () -> Unit,
         onError: (String) -> Unit,

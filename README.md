@@ -75,7 +75,7 @@ Download and install the APK from [Releases](https://github.com/mightykatun/spee
 
 Pushing a version tag such as `v1.3.0` runs the GitHub Actions release workflow. It verifies the version, runs tests and lint, builds the APK, creates an explicit source ZIP, generates SHA-256 checksums, and publishes all assets to GitHub Releases.
 
-Production signing uses repository secrets. Without signing secrets, the workflow publishes a clearly named debug-signed test APK as a prerelease. See [RELEASING.md](RELEASING.md).
+Production signing uses a persistent certificate stored in the protected `release-signing` environment, allowing later APKs with higher version codes to update the installed app in place. Missing or inconsistent signing secrets fail the release. See [RELEASING.md](RELEASING.md).
 
 ## License
 

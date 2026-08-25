@@ -4,6 +4,7 @@ import android.hardware.SensorEventListener
 import android.location.GnssStatus
 import android.location.Location
 import android.location.LocationListener
+import android.location.LocationManager
 import com.mightykatun.speedometer.app.domain.SpeedEstimator
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
 import com.mightykatun.speedometer.app.domain.model.GnssMeasurement
@@ -253,6 +254,60 @@ class SpeedRepositoryImplTest {
         assertEquals(0, fixture.capturedMeasurement().satelliteCount)
     }
 
+    @Test
+    fun `provider re-enable is reported before a fresh location`() {
+        val fixture = Fixture()
+        val recording = Recording()
+        fixture.repository.start(TrackingMode.HANDHELD, recording)
+        fixture.worker.runAll()
+        fixture.main.runAll()
+
+        fixture.location.emitProviderDisabled()
+        fixture.location.emitLocation(locationAt(1_000_000_000L))
+        fixture.main.runAll()
+        assertEquals(listOf("gps provider disabled"), recording.errors)
+        assertEquals(0, recording.providerEnabledCount)
+        assertEquals(0, recording.gnssAvailableCount)
+
+        fixture.location.emitProviderEnabled()
+        fixture.main.runAll()
+
+        assertEquals(1, recording.providerEnabledCount)
+        assertEquals(0, recording.gnssAvailableCount)
+    }
+
+    @Test
+    fun `stale displayed satellite evidence expires`() {
+        val fixture = Fixture()
+        val recording = Recording()
+        fixture.repository.start(TrackingMode.HANDHELD, recording)
+        fixture.worker.runAll()
+        fixture.main.runAll()
+        fixture.location.emitSatelliteCount(6)
+        fixture.main.runAll()
+        assertEquals(6, recording.satelliteCounts.last())
+
+        fixture.worker.nowNanos = 2_000_000_002L
+        fixture.worker.runNextDelayed()
+        fixture.main.runAll()
+
+        assertEquals(0, recording.satelliteCounts.last())
+    }
+
+    @Test
+    fun `fresh estimate is delivered before GNSS availability`() {
+        val fixture = Fixture()
+        val recording = Recording()
+        fixture.repository.start(TrackingMode.HANDHELD, recording)
+        fixture.worker.runAll()
+        fixture.main.runAll()
+
+        fixture.location.emitLocation(locationAt(1_000_000_000L))
+        fixture.main.runAll()
+
+        assertEquals(listOf("estimate", "available"), recording.measurementEvents)
+    }
+
     private fun Fixture.capturedMeasurement(): GnssMeasurement {
         val captor = argumentCaptor<GnssMeasurement>()
         verify(estimator).ingestGnssMeasurement(captor.capture())
@@ -291,15 +346,25 @@ class SpeedRepositoryImplTest {
         val satelliteCounts = mutableListOf<Int>()
         val errors = mutableListOf<String>()
         val modes = mutableListOf<TrackingMode>()
+        var providerEnabledCount = 0
+        var gnssAvailableCount = 0
+        val measurementEvents = mutableListOf<String>()
         var permissionRequests = 0
     }
 
     private fun SpeedRepositoryImpl.start(mode: TrackingMode, recording: Recording) {
         startUpdates(
             trackingMode = mode,
-            onEstimate = recording.estimates::add,
+            onEstimate = { estimate ->
+                recording.estimates += estimate
+                recording.measurementEvents += "estimate"
+            },
             onSatelliteCount = recording.satelliteCounts::add,
-            onGnssAvailable = {},
+            onGpsProviderEnabled = { recording.providerEnabledCount++ },
+            onGnssAvailable = {
+                recording.gnssAvailableCount++
+                recording.measurementEvents += "available"
+            },
             onPermissionRequired = { recording.permissionRequests++ },
             onError = recording.errors::add,
             onTrackingModeChanged = recording.modes::add
@@ -335,6 +400,12 @@ class SpeedRepositoryImplTest {
 
         fun runAll() {
             while (tasks.isNotEmpty()) tasks.removeFirst().invoke()
+        }
+
+        fun runNextDelayed() {
+            val entry = delayed.entries.first()
+            delayed.remove(entry.key)
+            entry.value.invoke()
         }
     }
 
@@ -394,6 +465,14 @@ class SpeedRepositoryImplTest {
             whenever(status.satelliteCount).thenReturn(count)
             for (index in 0 until count) whenever(status.usedInFix(index)).thenReturn(true)
             requireNotNull(gnssCallback).onSatelliteStatusChanged(status)
+        }
+
+        fun emitProviderDisabled() {
+            requireNotNull(locationListener).onProviderDisabled(LocationManager.GPS_PROVIDER)
+        }
+
+        fun emitProviderEnabled() {
+            requireNotNull(locationListener).onProviderEnabled(LocationManager.GPS_PROVIDER)
         }
     }
 
