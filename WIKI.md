@@ -14,6 +14,10 @@ The app uses Android GNSS speed as its absolute speed source. In `gnss+imu` mode
 
 The app remains a single-screen HUD with no navigation graph.
 
+### Top Center
+
+- Shows `speedometer vX.Y.Z` in centered gray text using the packaged app version
+
 ### Top Left
 
 - Shows recent satellites reported as used-in-fix by Android's GNSS status callback; stale evidence returns to zero
@@ -33,7 +37,7 @@ The app remains a single-screen HUD with no navigation graph.
 - Current speed to two decimal places
 - Tap the unit to cycle km/h, mph, knots, and m/s
 - Low speeds remain visible; there is no 1.5 km/h display floor
-- `--` means speed is not currently defensible
+- `--` means speed is not currently defensible and pulses while acquiring the initial measurement
 - A small colored dot in Picture-in-Picture and compact `± value unit` line report one-standard-deviation uncertainty
 - The uncertainty indicator is green at or below 10 percent of current speed, amber through 20 percent, and red above 20 percent or when the percentage is undefined
 - The uncertainty line is hidden while acquiring the first required GNSS fix or IMU sample

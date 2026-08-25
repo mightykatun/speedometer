@@ -16,7 +16,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -412,113 +416,124 @@ fun SpeedometerScreen(
                 )
             }
         } else {
-            if (warning != null && !isInPipMode && !compactLayout) {
-                Text(
-                    text = warning,
-                    color = Color(0xFFFFA000),
-                    textAlign = TextAlign.Center,
-                    fontSize = 13.sp,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 100.dp)
-                )
-            }
             if (!isInPipMode) {
-                Row(
+                Column(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .fillMaxWidth(),
-                    verticalAlignment = Alignment.Top
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Box(
-                            modifier = Modifier.height(48.dp),
-                            contentAlignment = Alignment.BottomStart
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(vertical = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                    Text(
+                        text = "speedometer v${BuildConfig.VERSION_NAME}",
+                        color = labelColor,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        fontSize = 14.sp,
+                        maxLines = 1
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Box(
+                                modifier = Modifier.height(48.dp),
+                                contentAlignment = Alignment.BottomStart
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(10.dp)
-                                        .background(
-                                            if (compactWarning != null) Color(0xFFFFA000) else statusColor,
-                                            shape = androidx.compose.foundation.shape.CircleShape
+                                Row(
+                                    modifier = Modifier.padding(vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(10.dp)
+                                            .background(
+                                                if (compactWarning != null) Color(0xFFFFA000) else statusColor,
+                                                shape = androidx.compose.foundation.shape.CircleShape
+                                            )
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    if (compactWarning != null) {
+                                        Text(
+                                            text = compactWarning,
+                                            color = primaryColor,
+                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 11.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.semantics {
+                                                contentDescription = compactWarning
+                                            }
                                         )
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                if (compactWarning != null) {
-                                    Text(
-                                        text = compactWarning,
-                                        color = primaryColor,
-                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 11.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.semantics {
-                                            contentDescription = compactWarning
-                                        }
-                                    )
-                                } else {
-                                    Text(
-                                        text = "satellites: ",
-                                        color = labelColor,
-                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                        fontSize = 14.sp,
-                                        maxLines = 1
-                                    )
-                                    Text(
-                                        text = "$displayedSatelliteCount",
-                                        color = primaryColor,
-                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 14.sp,
-                                        maxLines = 1
+                                    } else {
+                                        Text(
+                                            text = "satellites: ",
+                                            color = labelColor,
+                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                            fontSize = 14.sp,
+                                            maxLines = 1
+                                        )
+                                        Text(
+                                            text = "$displayedSatelliteCount",
+                                            color = primaryColor,
+                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 14.sp,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+                            if (compactActions) {
+                                Box(
+                                    modifier = Modifier.height(48.dp),
+                                    contentAlignment = Alignment.CenterStart
+                                ) {
+                                    AccuracyIndicator(
+                                        quality = displayedQuality,
+                                        speed = currentSpeed,
+                                        accuracy = currentAccuracy,
+                                        unit = speedUnit.label,
+                                        isInPipMode = false,
+                                        unavailableText = unavailableText
                                     )
                                 }
                             }
                         }
-                        if (compactActions) {
-                            Box(
-                                modifier = Modifier.height(48.dp),
-                                contentAlignment = Alignment.CenterStart
-                            ) {
-                                AccuracyIndicator(
-                                    quality = displayedQuality,
-                                    speed = currentSpeed,
-                                    accuracy = currentAccuracy,
-                                    unit = speedUnit.label,
-                                    isInPipMode = false,
-                                    unavailableText = unavailableText
-                                )
-                            }
+
+                        Column(horizontalAlignment = Alignment.End) {
+                            HudSelector(
+                                label = "mode",
+                                value = trackingMode.displayLabel,
+                                contentDescription = "Tracking mode",
+                                stateDescription = trackingMode.displayLabel,
+                                labelColor = labelColor,
+                                valueColor = if (supportsFixedMode) primaryColor else labelColor,
+                                enabled = supportsFixedMode,
+                                contentAlignment = Alignment.BottomEnd,
+                                onClick = onTrackingModeChange
+                            )
+                            HudSelector(
+                                label = "refresh",
+                                value = refreshRate.displayLabel,
+                                contentDescription = "Refresh rate",
+                                stateDescription = refreshRate.accessibilityLabel,
+                                labelColor = labelColor,
+                                valueColor = primaryColor,
+                                enabled = true,
+                                contentAlignment = Alignment.TopEnd,
+                                onClick = onRefreshRateChange
+                            )
                         }
                     }
-
-                    Column(horizontalAlignment = Alignment.End) {
-                        HudSelector(
-                            label = "mode",
-                            value = trackingMode.displayLabel,
-                            contentDescription = "Tracking mode",
-                            stateDescription = trackingMode.displayLabel,
-                            labelColor = labelColor,
-                            valueColor = if (supportsFixedMode) primaryColor else labelColor,
-                            enabled = supportsFixedMode,
-                            contentAlignment = Alignment.BottomEnd,
-                            onClick = onTrackingModeChange
-                        )
-                        HudSelector(
-                            label = "refresh",
-                            value = refreshRate.displayLabel,
-                            contentDescription = "Refresh rate",
-                            stateDescription = refreshRate.accessibilityLabel,
-                            labelColor = labelColor,
-                            valueColor = primaryColor,
-                            enabled = true,
-                            contentAlignment = Alignment.TopEnd,
-                            onClick = onRefreshRateChange
+                    if (warning != null && !compactLayout) {
+                        Text(
+                            text = warning,
+                            color = Color(0xFFFFA000),
+                            textAlign = TextAlign.Center,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(top = 8.dp)
                         )
                     }
                 }
@@ -567,6 +582,9 @@ fun SpeedometerScreen(
                 val parts = formattedSpeed?.split(".")
                 val intPart = parts?.get(0) ?: "--"
                 val decPart = parts?.getOrNull(1)
+                val placeholderAlpha = initializationPlaceholderAlpha(
+                    enabled = displayedQuality == EstimateQuality.ACQUIRING
+                )
 
                 Row {
                     // Integer Part
@@ -576,7 +594,7 @@ fun SpeedometerScreen(
                             fontSize = mainSpeedSize, 
                             fontWeight = FontWeight.Bold,
                             letterSpacing = letterSpacing,
-                            color = primaryColor
+                            color = primaryColor.copy(alpha = placeholderAlpha)
                         ),
                         modifier = Modifier.alignByBaseline()
                     )
@@ -669,6 +687,22 @@ fun SpeedometerScreen(
             }
         }
     }
+}
+
+@Composable
+private fun initializationPlaceholderAlpha(enabled: Boolean): Float {
+    if (!enabled) return 1f
+    val transition = rememberInfiniteTransition(label = "speed initialization")
+    val alpha by transition.animateFloat(
+        initialValue = 0.3f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "speed placeholder opacity"
+    )
+    return alpha
 }
 
 @Composable

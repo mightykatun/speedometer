@@ -52,6 +52,8 @@ class SpeedometerScreenTest {
             )
         }
 
+        composeRule.onNodeWithText("speedometer v${BuildConfig.VERSION_NAME}").assertIsDisplayed()
+        composeRule.onNodeWithText("--").assertIsDisplayed()
         composeRule.onNodeWithText("km/h").performClick()
         composeRule.onNodeWithContentDescription("Tracking mode")
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "gnss"))
