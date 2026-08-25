@@ -234,14 +234,14 @@ jobs:
           name: speedometer-${{ env.RELEASE_TAG }}
           path: dist
 
-      - name: Publish GitHub release
+      - name: Publish stable GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           (cd dist && sha256sum --check SHA256SUMS.txt)
-          flags=(--verify-tag --generate-notes --title "Speedometer $RELEASE_TAG")
+          flags=(--verify-tag --generate-notes --latest --title "Speedometer $RELEASE_TAG")
           gh release create \
             "$RELEASE_TAG" \
             dist/*.apk \
@@ -250,3 +250,15 @@ jobs:
             dist/SHA256SUMS.txt \
             "${flags[@]}" \
             --repo "$GITHUB_REPOSITORY"
+          test "$(
+            gh release view "$RELEASE_TAG" \
+              --json isDraft \
+              --jq '.isDraft' \
+              --repo "$GITHUB_REPOSITORY"
+          )" = "false"
+          test "$(
+            gh release view "$RELEASE_TAG" \
+              --json isPrerelease \
+              --jq '.isPrerelease' \
+              --repo "$GITHUB_REPOSITORY"
+          )" = "false"

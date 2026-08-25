@@ -35,4 +35,4 @@
 - Repositories are centralized in `settings.gradle.kts` with `FAIL_ON_PROJECT_REPOS`; adding a repository inside `app/build.gradle.kts` fails the build.
 - Gradle dependency verification metadata is checked in at `gradle/verification-metadata.xml`. Review and update checksums intentionally with dependency changes; do not bypass verification.
 - KAPT is currently unused. `kapt.incremental.apt=false` is a deliberate mitigation for CVE-2026-53914; do not re-enable its incremental cache when introducing annotation processing.
-- For releases, follow `RELEASING.md` and `.github/workflows/release.yml`. The `vX.Y.Z` tag must exactly match `versionName`, `versionCode` must increase, and all five persistent signing secrets are mandatory; missing, partial, or mismatched signing configuration fails closed.
+- For releases, follow `RELEASING.md` and `.github/workflows/release.yml`. The `vX.Y.Z` tag must exactly match `versionName`, `versionCode` must increase, and all five persistent signing secrets are mandatory; missing, partial, or mismatched signing configuration fails closed. Releases are stable production releases marked latest, never beta, test, or prerelease builds.

@@ -2,7 +2,9 @@
 
 Releases are created by `.github/workflows/release.yml` whenever a `v*` tag is pushed.
 
-The tag must match `versionName` in `app/build.gradle.kts`. For example, `versionName = "1.3.0"` requires tag `v1.3.0`.
+The tag must match `versionName` in `app/build.gradle.kts`. For example, `versionName = "2.0.0"` requires tag `v2.0.0`.
+
+Every workflow release is a stable production release marked as GitHub's latest release. The workflow has no beta, test-APK, or prerelease publication mode.
 
 Every release contains:
 
@@ -36,7 +38,7 @@ Keep an offline backup of the keystore and credentials. Android accepts an APK a
 1. Increase `versionCode` and update `versionName` in `app/build.gradle.kts`. CI rejects a release whose `versionCode` is not higher than every other existing release tag.
 2. Run `./gradlew --no-build-cache clean test lint assembleDebug stageReleaseSbomInputs assembleDebugAndroidTest`.
 3. Commit the release changes.
-4. Create the matching annotated tag, for example `git tag -a v1.3.0 -m "Speedometer v1.3.0"`.
+4. Create the matching annotated tag, for example `git tag -a v2.0.0 -m "Speedometer v2.0.0"`.
 5. Push the commit and tag.
 6. Verify the workflow and download each published asset.
 
