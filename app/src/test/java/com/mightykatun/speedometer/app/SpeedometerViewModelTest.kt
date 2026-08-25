@@ -43,16 +43,25 @@ class SpeedometerViewModelTest {
     }
 
     @Test
-    fun `generic estimator ticks do not clear GPS errors`() {
+    fun `generic estimator ticks do not clear provider disabled status`() {
         whenever(clock.elapsedRealtimeMillis()).thenReturn(0L, 1000L)
         viewModel.onSessionStart()
         viewModel.onGpsError("gps provider disabled")
 
         viewModel.onSpeedEstimateReceived(estimate(null, EstimateQuality.ACQUIRING))
 
-        assertEquals("gps provider disabled", viewModel.errorMessage)
-        viewModel.onGpsAvailable()
         assertNull(viewModel.errorMessage)
+        assertEquals("gps provider disabled", viewModel.signalMessage)
+        viewModel.onGpsAvailable()
+        assertNull(viewModel.signalMessage)
+    }
+
+    @Test
+    fun `other GPS errors remain blocking errors`() {
+        viewModel.onGpsError("Unable to monitor GNSS status")
+
+        assertEquals("Unable to monitor GNSS status", viewModel.errorMessage)
+        assertNull(viewModel.signalMessage)
     }
 
     @Test

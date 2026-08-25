@@ -52,7 +52,7 @@ Estimate states:
 - Top speed records accepted raw GNSS candidates after a two-second warmup, with at least three satellites and no estimator probation
 - Top satellites tracks the session maximum independently
 - A live-smoothed 30-second trend tail fades toward the left and animates between global UI refreshes
-- `reset` restarts acquisition and session statistics
+- `reset` restarts acquisition and session statistics from the normal HUD
 - Text-only `float` enters Picture-in-Picture on Android 8+
 
 ## Tracking Modes
@@ -183,7 +183,7 @@ No watchdog injects fake zero readings.
 | Condition | Behavior |
 |---|---|
 | Fine location denied | Explain that precise location is required |
-| GPS provider disabled | Display `gps provider disabled` |
+| GPS provider disabled | Show `gps provider disabled` in the inline unavailable-status position |
 | Speed absent or invalid | Ignore the measurement; never synthesize zero |
 | Speed uncertainty too poor | Preserve the prior estimate until it becomes stale |
 | IMU sensors absent | Disable `gnss+imu` |

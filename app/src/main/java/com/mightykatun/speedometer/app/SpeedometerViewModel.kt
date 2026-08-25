@@ -33,6 +33,9 @@ class SpeedometerViewModel(
     var warningMessage by mutableStateOf<String?>(null)
         private set
 
+    var signalMessage by mutableStateOf<String?>(null)
+        private set
+
     fun onSpeedEstimateReceived(estimate: SpeedEstimate) {
         val stats = sessionTracker.updateSpeed(estimate)
         latestMaxSpeedKmh = stats.maxSpeedKmh
@@ -78,6 +81,7 @@ class SpeedometerViewModel(
         state = SpeedometerState()
         errorMessage = null
         warningMessage = null
+        signalMessage = null
         gpsErrorActive = false
         latestPresentation = null
         latestMaxSpeedKmh = 0f
@@ -88,12 +92,19 @@ class SpeedometerViewModel(
 
     fun onError(message: String) {
         gpsErrorActive = false
+        signalMessage = null
         errorMessage = message
     }
 
     fun onGpsError(message: String) {
         gpsErrorActive = true
-        errorMessage = message
+        if (message == GPS_PROVIDER_DISABLED_MESSAGE) {
+            errorMessage = null
+            signalMessage = message
+        } else {
+            signalMessage = null
+            errorMessage = message
+        }
     }
 
     fun onWarning(message: String?) {
@@ -104,6 +115,7 @@ class SpeedometerViewModel(
         if (gpsErrorActive) {
             gpsErrorActive = false
             errorMessage = null
+            signalMessage = null
         }
     }
 
@@ -163,6 +175,7 @@ class SpeedometerViewModel(
     )
 
     private companion object {
+        const val GPS_PROVIDER_DISABLED_MESSAGE = "gps provider disabled"
         const val TREND_WINDOW_NANOS = 30_000_000_000L
         const val MAX_TREND_SAMPLES = 360
     }

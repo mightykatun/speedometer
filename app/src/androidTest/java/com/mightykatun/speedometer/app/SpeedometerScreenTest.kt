@@ -8,6 +8,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import com.mightykatun.speedometer.app.domain.model.EstimateQuality
 import com.mightykatun.speedometer.app.domain.model.RefreshRate
 import com.mightykatun.speedometer.app.domain.model.SpeedUnit
 import com.mightykatun.speedometer.app.domain.model.SpeedometerState
@@ -33,6 +34,7 @@ class SpeedometerScreenTest {
                 state = SpeedometerState(),
                 error = null,
                 warning = null,
+                signalMessage = null,
                 isInPipMode = false,
                 speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
                 trackingMode = TrackingMode.HANDHELD,
@@ -79,6 +81,7 @@ class SpeedometerScreenTest {
                 state = SpeedometerState(),
                 error = null,
                 warning = null,
+                signalMessage = null,
                 isInPipMode = false,
                 speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
                 trackingMode = TrackingMode.HANDHELD,
@@ -99,11 +102,74 @@ class SpeedometerScreenTest {
         composeRule.onNodeWithText("Precise location is required").assertIsDisplayed()
         composeRule.onNodeWithText("grant location").performClick()
         composeRule.onNodeWithText("open settings").performClick()
+        composeRule.onNodeWithText("reset").assertDoesNotExist()
         composeRule.onNodeWithText("float").assertDoesNotExist()
 
         composeRule.runOnIdle {
             assertEquals(1, retryClicks)
             assertEquals(1, settingsClicks)
         }
+    }
+
+    @Test
+    fun providerDisabledUsesInlineStatusOnMainHud() {
+        composeRule.setContent {
+            SpeedometerScreen(
+                state = SpeedometerState(
+                    currentSpeedKmh = 72f,
+                    estimateQuality = EstimateQuality.TRACKING
+                ),
+                error = null,
+                warning = null,
+                signalMessage = "gps provider disabled",
+                isInPipMode = false,
+                speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
+                trackingMode = TrackingMode.HANDHELD,
+                refreshRate = RefreshRate.ONE_SECOND,
+                supportsFixedMode = true,
+                supportsPip = false,
+                permissionMessage = null,
+                onSpeedUnitClick = {},
+                onTrackingModeChange = {},
+                onRefreshRateChange = {},
+                onReset = {},
+                onEnterPip = {},
+                onRequestPermission = {},
+                onOpenSettings = {}
+            )
+        }
+
+        composeRule.onNodeWithText("gps provider disabled").assertIsDisplayed()
+        composeRule.onNodeWithText("--").assertIsDisplayed()
+        composeRule.onNodeWithText("reset").assertIsDisplayed()
+    }
+
+    @Test
+    fun blockingGpsErrorHasNoReset() {
+        composeRule.setContent {
+            SpeedometerScreen(
+                state = SpeedometerState(),
+                error = "Unable to monitor GNSS status",
+                warning = null,
+                signalMessage = null,
+                isInPipMode = false,
+                speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
+                trackingMode = TrackingMode.HANDHELD,
+                refreshRate = RefreshRate.ONE_SECOND,
+                supportsFixedMode = true,
+                supportsPip = true,
+                permissionMessage = null,
+                onSpeedUnitClick = {},
+                onTrackingModeChange = {},
+                onRefreshRateChange = {},
+                onReset = {},
+                onEnterPip = {},
+                onRequestPermission = {},
+                onOpenSettings = {}
+            )
+        }
+
+        composeRule.onNodeWithText("Unable to monitor GNSS status").assertIsDisplayed()
+        composeRule.onNodeWithText("reset").assertDoesNotExist()
     }
 }

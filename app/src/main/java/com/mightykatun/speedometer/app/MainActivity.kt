@@ -118,6 +118,7 @@ class MainActivity : ComponentActivity() {
                 state = viewModel.state,
                 error = viewModel.errorMessage,
                 warning = viewModel.warningMessage,
+                signalMessage = viewModel.signalMessage,
                 isInPipMode = isInPipMode,
                 speedUnit = speedUnit,
                 trackingMode = trackingMode,
@@ -311,6 +312,7 @@ fun SpeedometerScreen(
     state: SpeedometerState,
     error: String?,
     warning: String?,
+    signalMessage: String?,
     isInPipMode: Boolean,
     speedUnit: SpeedUnit,
     trackingMode: TrackingMode,
@@ -333,8 +335,15 @@ fun SpeedometerScreen(
     val tertiaryColor = if (isDark) Color.DarkGray else Color.Gray
     val labelColor = if (isDark) Color.Gray else Color.DarkGray
 
-    val statusColor = if (state.satelliteCount >= 3) Color.Green else Color.Red
-    val currentSpeed = state.currentSpeedKmh?.let(speedUnit::fromKilometersPerHour)
+    val displayedSatelliteCount = if (signalMessage == null) state.satelliteCount else 0
+    val displayedSpeedKmh = state.currentSpeedKmh.takeIf { signalMessage == null }
+    val displayedQuality = if (signalMessage == null) {
+        state.estimateQuality
+    } else {
+        EstimateQuality.UNAVAILABLE
+    }
+    val statusColor = if (displayedSatelliteCount >= 3) Color.Green else Color.Red
+    val currentSpeed = displayedSpeedKmh?.let(speedUnit::fromKilometersPerHour)
     val currentAccuracy = state.speedAccuracyKmh?.let(speedUnit::fromKilometersPerHour)
     val maxSpeed = speedUnit.fromKilometersPerHour(state.maxSpeedKmh)
 
@@ -395,7 +404,6 @@ fun SpeedometerScreen(
                     textAlign = TextAlign.Center,
                     fontSize = 20.sp
                 )
-                MinimalAction(text = "reset", color = primaryColor, onClick = onReset)
             }
         } else {
             if (warning != null && !isInPipMode && !compactLayout) {
@@ -452,7 +460,7 @@ fun SpeedometerScreen(
                                     maxLines = 1
                                 )
                                 Text(
-                                    text = "${state.satelliteCount}",
+                                    text = "$displayedSatelliteCount",
                                     color = primaryColor,
                                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                                     fontWeight = FontWeight.Bold,
@@ -467,11 +475,12 @@ fun SpeedometerScreen(
                                 contentAlignment = Alignment.CenterStart
                             ) {
                                 AccuracyIndicator(
-                                    quality = state.estimateQuality,
+                                    quality = displayedQuality,
                                     speed = currentSpeed,
                                     accuracy = currentAccuracy,
                                     unit = speedUnit.label,
-                                    isInPipMode = false
+                                    isInPipMode = false,
+                                    unavailableText = signalMessage ?: "no signal"
                                 )
                             }
                         }
@@ -486,6 +495,7 @@ fun SpeedometerScreen(
                             labelColor = labelColor,
                             valueColor = if (supportsFixedMode) primaryColor else labelColor,
                             enabled = supportsFixedMode,
+                            contentAlignment = Alignment.BottomEnd,
                             onClick = onTrackingModeChange
                         )
                         HudSelector(
@@ -496,6 +506,7 @@ fun SpeedometerScreen(
                             labelColor = labelColor,
                             valueColor = primaryColor,
                             enabled = true,
+                            contentAlignment = Alignment.TopEnd,
                             onClick = onRefreshRateChange
                         )
                     }
@@ -505,7 +516,7 @@ fun SpeedometerScreen(
             if (showTrend) {
                 LiveSpeedTrendChart(
                     samples = state.speedTrend,
-                    currentSpeedKmh = state.currentSpeedKmh,
+                    currentSpeedKmh = displayedSpeedKmh,
                     refreshRate = refreshRate,
                     color = primaryColor,
                     modifier = Modifier
@@ -522,7 +533,7 @@ fun SpeedometerScreen(
                         .semantics {
                             contentDescription = speedTrendDescription(
                                 state.speedTrend,
-                                state.currentSpeedKmh,
+                                displayedSpeedKmh,
                                 speedUnit
                             )
                         }
@@ -595,11 +606,12 @@ fun SpeedometerScreen(
 
                 if (!compactActions) {
                     AccuracyIndicator(
-                        quality = state.estimateQuality,
+                        quality = displayedQuality,
                         speed = currentSpeed,
                         accuracy = currentAccuracy,
                         unit = speedUnit.label,
-                        isInPipMode = isInPipMode
+                        isInPipMode = isInPipMode,
+                        unavailableText = signalMessage ?: "no signal"
                     )
                 }
             }
@@ -657,9 +669,10 @@ private fun HudSelector(
     labelColor: Color,
     valueColor: Color,
     enabled: Boolean,
+    contentAlignment: Alignment,
     onClick: () -> Unit
 ) {
-    Row(
+    Box(
         modifier = Modifier
             .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
@@ -667,23 +680,25 @@ private fun HudSelector(
                 this.contentDescription = contentDescription
                 this.stateDescription = stateDescription
             },
-        verticalAlignment = Alignment.CenterVertically
+        contentAlignment = contentAlignment
     ) {
-        Text(
-            text = "$label: ",
-            color = labelColor,
-            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-            fontSize = 14.sp,
-            maxLines = 1
-        )
-        Text(
-            text = value,
-            color = valueColor,
-            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-            fontWeight = FontWeight.Bold,
-            fontSize = 14.sp,
-            maxLines = 1
-        )
+        Row(modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)) {
+            Text(
+                text = "$label: ",
+                color = labelColor,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                fontSize = 14.sp,
+                maxLines = 1
+            )
+            Text(
+                text = value,
+                color = valueColor,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                fontSize = 14.sp,
+                maxLines = 1
+            )
+        }
     }
 }
 
@@ -720,7 +735,8 @@ private fun AccuracyIndicator(
     speed: Float?,
     accuracy: Float?,
     unit: String,
-    isInPipMode: Boolean
+    isInPipMode: Boolean,
+    unavailableText: String = "no signal"
 ) {
     if (quality == EstimateQuality.ACQUIRING) return
 
@@ -743,10 +759,10 @@ private fun AccuracyIndicator(
         EstimateQuality.TRACKING, EstimateQuality.DEGRADED ->
             accuracy?.let { "± %.1f %s".format(Locale.US, it, unit) } ?: "estimating"
         EstimateQuality.ACQUIRING -> ""
-        EstimateQuality.UNAVAILABLE -> "no signal"
+        EstimateQuality.UNAVAILABLE -> unavailableText
     }
     val accessibilityText = when (quality) {
-        EstimateQuality.UNAVAILABLE -> "Speed unavailable"
+        EstimateQuality.UNAVAILABLE -> "$unavailableText, speed unavailable"
         EstimateQuality.TRACKING, EstimateQuality.DEGRADED ->
             "$text, ${level.name.lowercase(Locale.US)} accuracy"
         EstimateQuality.ACQUIRING -> "Acquiring speed"
@@ -773,21 +789,6 @@ private fun AccuracyIndicator(
                 .padding(top = 8.dp)
         )
     }
-}
-
-@Composable
-private fun MinimalAction(text: String, color: Color, onClick: () -> Unit) {
-    Text(
-        text = text,
-        color = color,
-        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-        fontWeight = FontWeight.Bold,
-        fontSize = 14.sp,
-        modifier = Modifier
-            .clickable(role = Role.Button, onClick = onClick)
-            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
-            .padding(horizontal = 8.dp, vertical = 5.dp)
-    )
 }
 
 @Composable
