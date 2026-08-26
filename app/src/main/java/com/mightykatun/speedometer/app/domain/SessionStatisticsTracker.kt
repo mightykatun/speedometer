@@ -47,10 +47,10 @@ class SessionStatisticsTracker(
         return snapshot(currentSpeedKmh)
     }
 
-    fun updateSatelliteCount(satelliteCount: Int): SessionStatistics {
+    fun updateSatelliteCount(satelliteCount: Int): Int {
         currentSatellites = satelliteCount
         maxSatellites = max(maxSatellites, satelliteCount)
-        return snapshot(null)
+        return maxSatellites
     }
     
     fun reset() {

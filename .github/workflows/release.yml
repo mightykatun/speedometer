@@ -88,6 +88,29 @@ jobs:
         shell: bash
         run: ./gradlew --no-build-cache clean test lint assembleDebug stageReleaseSbomInputs
 
+      - name: Verify release privacy boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="app/build/intermediates/merged_manifest/release/processReleaseMainManifest/AndroidManifest.xml"
+          test -f "$manifest"
+          perl -0777 -ne 'exit(/android:allowBackup="false"/ ? 0 : 1)' "$manifest"
+          perl -0777 -ne 'exit(/android:dataExtractionRules="@xml\/data_extraction_rules"/ ? 0 : 1)' "$manifest"
+          perl -0777 -ne 'exit(/android:fullBackupContent="@xml\/backup_rules"/ ? 0 : 1)' "$manifest"
+          for permission in \
+            android.permission.INTERNET \
+            android.permission.ACCESS_BACKGROUND_LOCATION \
+            android.permission.READ_EXTERNAL_STORAGE \
+            android.permission.WRITE_EXTERNAL_STORAGE \
+            android.permission.MANAGE_EXTERNAL_STORAGE; do
+            if FORBIDDEN_PERMISSION="$permission" \
+              perl -ne '$found = 1 if index($_, $ENV{FORBIDDEN_PERMISSION}) >= 0; END { exit($found ? 0 : 1) }' \
+              "$manifest"; then
+              printf 'Forbidden permission in merged release manifest: %s\n' "$permission" >&2
+              exit 1
+            fi
+          done
+
       - name: Generate SPDX SBOM
         shell: bash
         run: |
@@ -112,6 +135,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          umask 077
           mkdir -p dist
           cp app/build/outputs/apk/debug/app-debug.apk dist/app-debug.apk
           cp app/build/outputs/apk/release/app-release-unsigned.apk dist/app-release-unsigned.apk

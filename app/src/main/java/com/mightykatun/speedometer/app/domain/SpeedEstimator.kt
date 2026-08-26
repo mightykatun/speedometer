@@ -73,8 +73,6 @@ class SpeedEstimator(
         var accelerationResidualVariance: Double = 0.0,
         var inertialSystematicVariance: Double = 0.0,
         var inertialSystematicUncertaintyExposure: Double = 0.0,
-        var lastObservedLongitudinalAcceleration: Double? = null,
-        var lastObservedAccelerationNanos: Long = 0L,
         var lastObservedHorizontalAcceleration: Double? = null,
         var lastObservedHorizontalAccelerationNanos: Long = 0L,
         var courseRadians: Double? = null,
@@ -156,17 +154,17 @@ class SpeedEstimator(
         finalizedChanges.values.forEach(::queueCandidateChange)
     }
 
-    fun ingestGnssMeasurement(measurement: GnssMeasurement) {
-        if (measurement.timestampNanos <= historyBaseInputNanos || measurement.timestampNanos <= 0L) return
-        if (!gnssTimestamps.add(measurement.timestampNanos)) return
+    fun ingestGnssMeasurement(measurement: GnssMeasurement): Long? {
+        if (measurement.timestampNanos <= historyBaseInputNanos || measurement.timestampNanos <= 0L) return null
+        if (!gnssTimestamps.add(measurement.timestampNanos)) return null
 
         val newestTimestamp = newestHistoryTimestamp()
         if (newestTimestamp - measurement.timestampNanos > config.maximumDelayedGnssNanos) {
             gnssTimestamps.remove(measurement.timestampNanos)
-            return
+            return null
         }
 
-        insertAndProcess(Input.Gnss(measurement))
+        return insertAndProcess(Input.Gnss(measurement))
     }
 
     fun ingestMotionMeasurement(measurement: MotionMeasurement) {
@@ -241,13 +239,15 @@ class SpeedEstimator(
 
     fun estimateAt(timestampNanos: Long): SpeedEstimate = snapshotAt(timestampNanos)
 
-    private fun insertAndProcess(input: Input) {
+    private fun insertAndProcess(input: Input): Long? {
         val insertionIndex = insertionIndex(input)
+        var newlyAcceptedGnssTimestamp: Long? = null
 
         if (insertionIndex == history.size) {
             val candidate = process(input)
             history += HistoryEntry(input, state.copy(), candidate)
             candidate?.let { queueCandidateChange(MaximumCandidateChange.Upsert(it)) }
+            newlyAcceptedGnssTimestamp = acceptedGnssTimestamp(history.last())
         } else {
             state = if (insertionIndex == historyStart) {
                 historyBase.copy()
@@ -256,15 +256,26 @@ class SpeedEstimator(
             }
             history.add(insertionIndex, HistoryEntry(input, state.copy()))
             for (index in insertionIndex until history.size) {
+                val previouslyAccepted = acceptedGnssTimestamp(history[index])
                 val oldCandidate = history[index].maximumCandidate
                 val newCandidate = process(history[index].input)
                 history[index].stateAfter = state.copy()
                 history[index].maximumCandidate = newCandidate
                 queueCandidateDifference(history[index].input, oldCandidate, newCandidate)
+                val accepted = acceptedGnssTimestamp(history[index])
+                if (accepted != null && accepted != previouslyAccepted) {
+                    newlyAcceptedGnssTimestamp = maxOf(newlyAcceptedGnssTimestamp ?: 0L, accepted)
+                }
             }
         }
         pruneHistory(newestHistoryTimestamp())
+        return newlyAcceptedGnssTimestamp
     }
+
+    private fun acceptedGnssTimestamp(entry: HistoryEntry): Long? =
+        (entry.input as? Input.Gnss)?.timestampNanos?.takeIf {
+            entry.stateAfter.lastAcceptedGnssNanos == it
+        }
 
     private fun process(input: Input): MaximumCandidate? =
         when (input) {
@@ -332,12 +343,12 @@ class SpeedEstimator(
         val previousRoll = state.lastReliableRollRadians
         if (state.lastReliableOrientationNanos > 0L) {
             val dt = orientation.timestampNanos - state.lastReliableOrientationNanos
-            val abruptRotation =
-            dt in 1..250_000_000L && listOfNotNull(
-                previousYaw?.let { abs(angleDelta(orientation.yawRadians, it)) },
-                previousPitch?.let { abs(angleDelta(orientation.pitchRadians, it)) },
-                previousRoll?.let { abs(angleDelta(orientation.rollRadians, it)) }
-            ).maxOrNull()?.let { it > Math.toRadians(20.0) } == true
+            val threshold = Math.toRadians(20.0)
+            val abruptRotation = dt in 1..250_000_000L && (
+                previousYaw?.let { abs(angleDelta(orientation.yawRadians, it)) > threshold } == true ||
+                    previousPitch?.let { abs(angleDelta(orientation.pitchRadians, it)) > threshold } == true ||
+                    previousRoll?.let { abs(angleDelta(orientation.rollRadians, it)) > threshold } == true
+                )
             if (abruptRotation) state.recentAbruptOrientationNanos = orientation.timestampNanos
         }
         state.lastReliableYawRadians = orientation.yawRadians
@@ -372,10 +383,6 @@ class SpeedEstimator(
         }
 
         val projection = accelerationProjection(measurement)
-        if (projection != null) {
-            state.lastObservedLongitudinalAcceleration = projection.longitudinal
-            state.lastObservedAccelerationNanos = measurement.timestampNanos
-        }
         val accelerationInput = projection?.let { robustAcceleration(it, measurement.timestampNanos) }
         predict(measurement.timestampNanos, accelerationInput)
         val unsignedLaunchAcceleration = if (projection == null && measurement.orientationReliable) {
@@ -645,8 +652,6 @@ class SpeedEstimator(
         state.courseAnchorYawRadians = null
         state.courseAnchorNanos = 0L
         resetAccelerationFilter()
-        state.lastObservedLongitudinalAcceleration = null
-        state.lastObservedAccelerationNanos = 0L
         if (resetLegacyBearing) {
             state.legacyBearingDegrees = null
             state.stableLegacyBearingCount = 0

@@ -14,12 +14,9 @@ The app uses Android GNSS speed as its absolute speed source. In `gnss+imu` mode
 
 The app remains a single-screen HUD with no navigation graph.
 
-### Top Center
-
-- Shows `speedometer vX.Y.Z` in centered gray text using the packaged app version
-
 ### Top Left
 
+- Shows `speedometer vX.Y.Z` as a compact gray label using the packaged app version
 - Shows recent satellites reported as used-in-fix by Android's GNSS status callback; stale evidence returns to zero
 - GNSS status is green at three or more satellites and red below three
 - Satellite count is status information, not a speed-accuracy measurement
@@ -152,7 +149,7 @@ The acceleration channel uses a median-of-three prefilter and an exponential smo
 
 ### Delayed Measurements
 
-The estimator retains five seconds of timestamped inputs and state checkpoints. A GNSS measurement delayed by up to three seconds is inserted at its measurement epoch, then all later events are replayed. Applying an old fix at callback time is prohibited. GNSS, motion, and orientation identities are deduplicated by stream and elapsed-realtime timestamp. History uses indexed duplicate checks, binary insertion, logical-prefix pruning, and amortized compaction.
+The estimator retains five seconds of timestamped inputs and state checkpoints. A GNSS measurement delayed by up to three seconds is inserted at its measurement epoch, then all later events are replayed. Applying an old fix at callback time is prohibited. GNSS, motion, and orientation identities are deduplicated by stream and elapsed-realtime timestamp. History uses indexed duplicate checks, binary insertion, logical-prefix pruning, and amortized compaction. An accepted delayed correction still replays normally, but one measured before the current provider-recovery boundary cannot complete recovery.
 
 ### Low Speed and Stationarity
 
@@ -179,7 +176,8 @@ No watchdog injects fake zero readings.
 - Acquisition starts in `onStart` after precise-location permission is available
 - Acquisition and sensor listeners survive configuration recreation but stop when the app backgrounds
 - Session statistics reset when the app backgrounds
-- Display unit, tracking mode, and global refresh interval persist locally
+- Display unit, requested tracking mode, and global refresh interval persist locally
+- A non-sensitive permission-requested marker persists only to distinguish first request from settings-only denial; permission grants and in-flight state do not persist as behavioral preferences
 - No location, motion, or session history leaves the device
 
 ## Errors and Fallbacks
@@ -187,10 +185,14 @@ No watchdog injects fake zero readings.
 | Condition | Behavior |
 |---|---|
 | Fine location denied | Explain that precise location is required |
-| GPS provider disabled | Show `gps provider disabled` inline until the provider is enabled, then wait for a fresh speed-bearing fix |
+| Permission can be requested again | Show `grant location` |
+| Permission permanently denied or policy-blocked | Show `open settings` instead of an inert grant action |
+| GPS provider disabled | Show `gps provider disabled` inline until enabled, then wait for an estimator-accepted correction from the current recovery epoch with an elapsed-realtime timestamp newer than the disable/re-enable boundary |
 | Speed absent or invalid | Ignore the measurement; never synthesize zero |
 | Speed uncertainty too poor | Preserve the prior estimate until it becomes stale |
 | IMU sensors absent | Disable `gnss+imu` |
+| IMU registration fails | Run GNSS-only for that session, preserve the requested `gnss+imu` preference, and retry next session |
+| GPS startup fails transiently | Show a foreground retry action |
 | Orientation unreliable or stale in `gnss+imu` | Continue GNSS-only |
 | Course absent or stale in `gnss+imu` | Continue GNSS-only |
 | Gross phone movement in `gnss+imu` | Drop the course anchor, quarantine IMU prediction, and require a fresh course |

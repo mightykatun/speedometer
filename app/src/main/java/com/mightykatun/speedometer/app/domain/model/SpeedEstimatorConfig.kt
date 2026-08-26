@@ -26,7 +26,6 @@ data class SpeedEstimatorConfig(
     val maximumLegacyBearingDeltaDegrees: Double = 12.0,
     val maximumTrackingTwoSigmaMetersPerSecond: Double = 2.5,
     val maximumTrustedTwoSigmaMetersPerSecond: Double = 2.0,
-    val maximumTrustedGnssAgeNanos: Long = 500_000_000L,
     val inertialSmoothingTimeConstantSeconds: Double = 0.08,
     val accelerationResidualTimeConstantSeconds: Double = 0.2,
     val baseAccelerationUncertaintyMetersPerSecondSquared: Double = 0.25,

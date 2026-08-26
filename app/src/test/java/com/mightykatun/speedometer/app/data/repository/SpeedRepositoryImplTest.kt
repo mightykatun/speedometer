@@ -12,6 +12,7 @@ import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import com.mightykatun.speedometer.app.domain.model.TrackingMode
 import java.util.ArrayDeque
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.kotlin.any
@@ -84,7 +85,7 @@ class SpeedRepositoryImplTest {
         fixture.worker.runAll()
         fixture.main.runAll()
 
-        assertEquals(listOf("Error starting GPS: provider unavailable"), first.errors)
+        assertEquals(listOf(RepositoryError.RETRYABLE_STARTUP_FAILURE), first.errors)
         assertEquals(1, fixture.location.removeCount)
 
         fixture.location.requestFailure = null
@@ -120,6 +121,7 @@ class SpeedRepositoryImplTest {
         fixture.main.runAll()
 
         assertEquals(listOf(TrackingMode.HANDHELD), recording.modes)
+        assertEquals(TrackingMode.FIXED, recording.modeResults.single().requestedMode)
         assertTrue(recording.errors.isEmpty())
         assertEquals(1, fixture.motion.registerCount)
         assertTrue(fixture.motion.unregisterCount >= 1)
@@ -143,6 +145,25 @@ class SpeedRepositoryImplTest {
         assertEquals(2, fixture.motion.registerCount)
         assertEquals(TrackingMode.FIXED, recording.modes.last())
         verify(fixture.estimator).setTrackingMode(TrackingMode.FIXED)
+    }
+
+    @Test
+    fun `mode command identities increase and remain attached to results`() {
+        val fixture = Fixture()
+        val recording = Recording()
+
+        val startId = fixture.repository.start(TrackingMode.HANDHELD, recording)
+        fixture.worker.runAll()
+        val fixedId = fixture.repository.setTrackingMode(TrackingMode.FIXED)
+        fixture.worker.runAll()
+        fixture.main.runAll()
+
+        assertTrue(fixedId > startId)
+        assertEquals(listOf(startId, fixedId), recording.modeResults.map(TrackingModeResult::commandId))
+        assertEquals(
+            listOf(TrackingMode.HANDHELD, TrackingMode.FIXED),
+            recording.modeResults.map(TrackingModeResult::requestedMode)
+        )
     }
 
     @Test
@@ -255,7 +276,79 @@ class SpeedRepositoryImplTest {
     }
 
     @Test
-    fun `provider re-enable is reported before a fresh location`() {
+    fun `Android location fields retain their domain units and nullability`() {
+        val measurement = createGnssMeasurement(
+            location = locationAt(
+                timestampNanos = 7_000_000_000L,
+                speed = 12.5f,
+                bearing = 123.5f,
+                horizontalAccuracy = 4.5f
+            ),
+            satelliteCount = 7,
+            magneticDeclinationDegrees = 1.25,
+            speedAccuracyMetersPerSecond = 0.4f,
+            bearingAccuracyDegrees = 2.5f,
+            includeCourseFields = true
+        )
+
+        assertEquals(12.5, measurement.speedMetersPerSecond!!, 0.0)
+        assertEquals(0.4, measurement.speedAccuracyMetersPerSecond!!, 0.000001)
+        assertEquals(123.5, measurement.bearingDegrees!!, 0.0)
+        assertEquals(2.5, measurement.bearingAccuracyDegrees!!, 0.0)
+        assertEquals(4.5, measurement.horizontalAccuracyMeters!!, 0.0)
+        assertEquals(1.25, measurement.magneticDeclinationDegrees!!, 0.0)
+        assertEquals(7, measurement.satelliteCount)
+        assertEquals(7_000_000_000L, measurement.timestampNanos)
+    }
+
+    @Test
+    fun `invalid optional Android location fields map to null`() {
+        val measurement = createGnssMeasurement(
+            location = locationAt(
+                timestampNanos = 8_000_000_000L,
+                speed = Float.NaN,
+                bearing = Float.NaN,
+                horizontalAccuracy = -1f
+            ),
+            satelliteCount = 0,
+            magneticDeclinationDegrees = null,
+            speedAccuracyMetersPerSecond = -1f,
+            bearingAccuracyDegrees = -1f,
+            includeCourseFields = true
+        )
+
+        assertNull(measurement.speedMetersPerSecond)
+        assertNull(measurement.speedAccuracyMetersPerSecond)
+        assertNull(measurement.bearingDegrees)
+        assertNull(measurement.bearingAccuracyDegrees)
+        assertNull(measurement.horizontalAccuracyMeters)
+    }
+
+    @Test
+    fun `handheld location mapping omits fixed-mode course metadata`() {
+        val measurement = createGnssMeasurement(
+            location = locationAt(
+                timestampNanos = 9_000_000_000L,
+                bearing = 90f,
+                horizontalAccuracy = 3f
+            ),
+            satelliteCount = 4,
+            magneticDeclinationDegrees = 2.0,
+            speedAccuracyMetersPerSecond = 0.3f,
+            bearingAccuracyDegrees = 1f,
+            includeCourseFields = false
+        )
+
+        assertEquals(5.0, measurement.speedMetersPerSecond!!, 0.0)
+        assertEquals(0.3, measurement.speedAccuracyMetersPerSecond!!, 0.000001)
+        assertNull(measurement.bearingDegrees)
+        assertNull(measurement.bearingAccuracyDegrees)
+        assertNull(measurement.horizontalAccuracyMeters)
+        assertNull(measurement.magneticDeclinationDegrees)
+    }
+
+    @Test
+    fun `provider re-enable does not report recovery`() {
         val fixture = Fixture()
         val recording = Recording()
         fixture.repository.start(TrackingMode.HANDHELD, recording)
@@ -265,15 +358,15 @@ class SpeedRepositoryImplTest {
         fixture.location.emitProviderDisabled()
         fixture.location.emitLocation(locationAt(1_000_000_000L))
         fixture.main.runAll()
-        assertEquals(listOf("gps provider disabled"), recording.errors)
+        assertEquals(listOf(RepositoryError.GPS_PROVIDER_DISABLED), recording.errors)
         assertEquals(0, recording.providerEnabledCount)
-        assertEquals(0, recording.gnssAvailableCount)
+        assertEquals(0, recording.recoveryCount)
 
         fixture.location.emitProviderEnabled()
         fixture.main.runAll()
 
         assertEquals(1, recording.providerEnabledCount)
-        assertEquals(0, recording.gnssAvailableCount)
+        assertEquals(0, recording.recoveryCount)
     }
 
     @Test
@@ -295,17 +388,52 @@ class SpeedRepositoryImplTest {
     }
 
     @Test
-    fun `fresh estimate is delivered before GNSS availability`() {
+    fun `accepted correction after provider recovery is delivered before recovery signal`() {
         val fixture = Fixture()
         val recording = Recording()
         fixture.repository.start(TrackingMode.HANDHELD, recording)
         fixture.worker.runAll()
         fixture.main.runAll()
 
-        fixture.location.emitLocation(locationAt(1_000_000_000L))
+        fixture.worker.nowNanos = 20_000_000_000L
+        fixture.location.emitProviderDisabled()
+        fixture.worker.nowNanos = 21_000_000_000L
+        fixture.location.emitProviderEnabled()
+        fixture.location.emitLocation(locationAt(22_000_000_000L))
         fixture.main.runAll()
 
-        assertEquals(listOf("estimate", "available"), recording.measurementEvents)
+        assertEquals(listOf("estimate", "recovered"), recording.measurementEvents)
+    }
+
+    @Test
+    fun `rejected and pre-boundary corrections cannot complete provider recovery`() {
+        val fixture = Fixture()
+        val recording = Recording()
+        fixture.repository.start(TrackingMode.HANDHELD, recording)
+        fixture.worker.runAll()
+        fixture.main.runAll()
+
+        fixture.worker.nowNanos = 20_000_000_000L
+        fixture.location.emitProviderDisabled()
+        fixture.worker.nowNanos = 21_000_000_000L
+        fixture.location.emitProviderEnabled()
+        fixture.location.emitLocation(locationAt(19_000_000_000L))
+        fixture.main.runAll()
+        assertEquals(0, recording.recoveryCount)
+
+        whenever(fixture.estimator.ingestGnssMeasurement(any())).thenReturn(null)
+        fixture.location.emitLocation(locationAt(22_000_000_000L))
+        fixture.main.runAll()
+        assertEquals(0, recording.recoveryCount)
+
+        whenever(fixture.estimator.ingestGnssMeasurement(any())).thenReturn(23_000_000_000L)
+        fixture.location.emitLocation(locationAt(23_000_000_000L))
+        fixture.main.runAll()
+        assertEquals(1, recording.recoveryCount)
+
+        fixture.location.emitLocation(locationAt(24_000_000_000L))
+        fixture.main.runAll()
+        assertEquals(1, recording.recoveryCount)
     }
 
     private fun Fixture.capturedMeasurement(): GnssMeasurement {
@@ -314,10 +442,19 @@ class SpeedRepositoryImplTest {
         return captor.firstValue
     }
 
-    private fun locationAt(timestampNanos: Long): Location = mock<Location>().also { location ->
+    private fun locationAt(
+        timestampNanos: Long,
+        speed: Float = 5f,
+        bearing: Float? = null,
+        horizontalAccuracy: Float? = null
+    ): Location = mock<Location>().also { location ->
         whenever(location.elapsedRealtimeNanos).thenReturn(timestampNanos)
         whenever(location.hasSpeed()).thenReturn(true)
-        whenever(location.speed).thenReturn(5f)
+        whenever(location.speed).thenReturn(speed)
+        whenever(location.hasBearing()).thenReturn(bearing != null)
+        whenever(location.bearing).thenReturn(bearing ?: 0f)
+        whenever(location.hasAccuracy()).thenReturn(horizontalAccuracy != null)
+        whenever(location.accuracy).thenReturn(horizontalAccuracy ?: 0f)
     }
 
     private class Fixture(supportsFixedMode: Boolean = true) {
@@ -329,6 +466,9 @@ class SpeedRepositoryImplTest {
         val repository: SpeedRepositoryImpl
 
         init {
+            whenever(estimator.ingestGnssMeasurement(any())).thenAnswer { invocation ->
+                invocation.getArgument<GnssMeasurement>(0).timestampNanos
+            }
             whenever(estimator.snapshotAt(any())).thenReturn(estimate())
             repository = SpeedRepositoryImpl(estimator, worker, main, location, motion)
         }
@@ -344,15 +484,17 @@ class SpeedRepositoryImplTest {
     private class Recording {
         val estimates = mutableListOf<SpeedEstimate>()
         val satelliteCounts = mutableListOf<Int>()
-        val errors = mutableListOf<String>()
-        val modes = mutableListOf<TrackingMode>()
+        val errors = mutableListOf<RepositoryError>()
+        val modeResults = mutableListOf<TrackingModeResult>()
+        val modes: List<TrackingMode>
+            get() = modeResults.map(TrackingModeResult::effectiveMode)
         var providerEnabledCount = 0
-        var gnssAvailableCount = 0
+        var recoveryCount = 0
         val measurementEvents = mutableListOf<String>()
         var permissionRequests = 0
     }
 
-    private fun SpeedRepositoryImpl.start(mode: TrackingMode, recording: Recording) {
+    private fun SpeedRepositoryImpl.start(mode: TrackingMode, recording: Recording): Long =
         startUpdates(
             trackingMode = mode,
             onEstimate = { estimate ->
@@ -361,15 +503,14 @@ class SpeedRepositoryImplTest {
             },
             onSatelliteCount = recording.satelliteCounts::add,
             onGpsProviderEnabled = { recording.providerEnabledCount++ },
-            onGnssAvailable = {
-                recording.gnssAvailableCount++
-                recording.measurementEvents += "available"
+            onGpsRecoveryAccepted = {
+                recording.recoveryCount++
+                recording.measurementEvents += "recovered"
             },
             onPermissionRequired = { recording.permissionRequests++ },
             onError = recording.errors::add,
-            onTrackingModeChanged = recording.modes::add
+            onTrackingModeResult = recording.modeResults::add
         )
-    }
 
     private class FakeWorker : RepositoryWorker {
         private val tasks = ArrayDeque<() -> Unit>()
@@ -382,6 +523,8 @@ class SpeedRepositoryImplTest {
             tasks.addLast(block)
             return true
         }
+
+        override fun postIfRunning(block: () -> Unit): Boolean = post(block)
 
         override fun postDelayed(runnable: Runnable, delayMillis: Long) {
             if (!closed) delayed[runnable] = { runnable.run() }
@@ -485,6 +628,7 @@ class SpeedRepositoryImplTest {
 
         override fun register(listener: SensorEventListener): Boolean {
             registerCount++
+            if (!registrationSucceeds) unregisterCount++
             return registrationSucceeds
         }
 

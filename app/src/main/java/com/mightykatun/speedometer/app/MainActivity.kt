@@ -22,7 +22,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -30,6 +29,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,7 +39,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -53,6 +55,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 
 import com.mightykatun.speedometer.app.di.SpeedometerViewModelFactory
+import com.mightykatun.speedometer.app.data.repository.TrackingModeResult
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
 import com.mightykatun.speedometer.app.domain.model.RefreshRate
 import com.mightykatun.speedometer.app.domain.model.SpeedUnit
@@ -70,9 +73,10 @@ class MainActivity : ComponentActivity() {
 
     private var isInPipMode by mutableStateOf(false)
     private var speedUnit by mutableStateOf(SpeedUnit.KILOMETERS_PER_HOUR)
-    private var trackingMode by mutableStateOf(TrackingMode.HANDHELD)
+    private var effectiveTrackingMode by mutableStateOf(TrackingMode.HANDHELD)
     private var refreshRate by mutableStateOf(RefreshRate.ONE_SECOND)
-    private var preferredTrackingMode = TrackingMode.HANDHELD
+    private var requestedTrackingMode = TrackingMode.HANDHELD
+    private var latestModeCommandId = 0L
     private var permissionIssue by mutableStateOf<LocationPermissionIssue?>(null)
     private var permissionRequestInFlight = false
 
@@ -81,36 +85,34 @@ class MainActivity : ComponentActivity() {
     ) { permissions ->
         permissionRequestInFlight = false
         val fineLocation = permissions[Manifest.permission.ACCESS_FINE_LOCATION] ?: false
-        val coarseLocation = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] ?: false
 
         if (fineLocation) {
             permissionIssue = null
             startSpeedTracking()
         } else {
-            permissionIssue = if (coarseLocation) {
-                LocationPermissionIssue.PRECISE_REQUIRED
-            } else {
-                LocationPermissionIssue.DENIED
-            }
+            permissionIssue = currentPermissionIssue()
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        permissionRequestInFlight = savedInstanceState?.getBoolean(PERMISSION_REQUEST_IN_FLIGHT_KEY) == true
         val preferences = getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
         speedUnit = SpeedUnit.fromPreference(preferences.getString(SPEED_UNIT_KEY, null))
         refreshRate = RefreshRate.fromPreference(
             preferences.getString(REFRESH_RATE_KEY, null)
         )
         viewModel.onRefreshRateChanged(refreshRate)
-        preferredTrackingMode = TrackingMode.fromPreference(preferences.getString(TRACKING_MODE_KEY, null))
-            .takeIf { it != TrackingMode.FIXED || speedRepository.supportsFixedMode }
-            ?: TrackingMode.HANDHELD
-        trackingMode = preferredTrackingMode
+        requestedTrackingMode = TrackingMode.fromPreference(preferences.getString(TRACKING_MODE_KEY, null))
+        effectiveTrackingMode = requestedTrackingMode.takeIf {
+            it != TrackingMode.FIXED || speedRepository.supportsFixedMode
+        } ?: TrackingMode.HANDHELD
         
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
             != PackageManager.PERMISSION_GRANTED) {
-            if (preferences.getBoolean(LOCATION_PERMISSION_REQUESTED_KEY, false)) {
+            if (permissionRequestInFlight) {
+                permissionIssue = null
+            } else if (preferences.getBoolean(LOCATION_PERMISSION_REQUESTED_KEY, false)) {
                 permissionIssue = currentPermissionIssue()
             } else {
                 requestLocationPermission()
@@ -125,20 +127,28 @@ class MainActivity : ComponentActivity() {
                 signalMessage = viewModel.signalMessage,
                 isInPipMode = isInPipMode,
                 speedUnit = speedUnit,
-                trackingMode = trackingMode,
+                trackingMode = effectiveTrackingMode,
                 refreshRate = refreshRate,
-                supportsFixedMode = speedRepository.supportsFixedMode,
+                trackingModeEnabled = speedRepository.supportsFixedMode ||
+                    requestedTrackingMode == TrackingMode.FIXED,
                 supportsPip = supportsPictureInPicture(),
                 permissionMessage = permissionIssue?.message,
+                permissionCanRequest = permissionIssue?.canRequest == true,
                 onSpeedUnitClick = { cycleSpeedUnit() },
                 onTrackingModeChange = { cycleTrackingMode() },
                 onRefreshRateChange = { cycleRefreshRate() },
                 onReset = { restartMeasurements() },
+                onRetry = { restartMeasurements() },
                 onEnterPip = { enterPipMode() },
                 onRequestPermission = { requestLocationPermission() },
                 onOpenSettings = { openAppSettings() }
             )
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean(PERMISSION_REQUEST_IN_FLIGHT_KEY, permissionRequestInFlight)
+        super.onSaveInstanceState(outState)
     }
 
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
@@ -170,7 +180,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun cycleTrackingMode() {
-        val nextMode = when (preferredTrackingMode) {
+        val nextMode = when (requestedTrackingMode) {
             TrackingMode.HANDHELD -> if (speedRepository.supportsFixedMode) {
                 TrackingMode.FIXED
             } else TrackingMode.HANDHELD
@@ -189,13 +199,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun changeTrackingMode(nextMode: TrackingMode) {
-        preferredTrackingMode = nextMode
-        trackingMode = preferredTrackingMode
+        requestedTrackingMode = nextMode
         getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
             .edit()
-            .putString(TRACKING_MODE_KEY, preferredTrackingMode.preferenceValue)
+            .putString(TRACKING_MODE_KEY, requestedTrackingMode.preferenceValue)
             .apply()
-        speedRepository.setTrackingMode(nextMode)
+        latestModeCommandId = speedRepository.setTrackingMode(nextMode)
     }
 
     override fun onStart() {
@@ -223,33 +232,30 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startSpeedTracking() {
-        speedRepository.startUpdates(
-            trackingMode = preferredTrackingMode,
+        latestModeCommandId = speedRepository.startUpdates(
+            trackingMode = requestedTrackingMode,
             onEstimate = viewModel::onSpeedEstimateReceived,
             onSatelliteCount = viewModel::onSatelliteCountReceived,
             onGpsProviderEnabled = viewModel::onGpsProviderEnabled,
-            onGnssAvailable = viewModel::onGpsAvailable,
+            onGpsRecoveryAccepted = viewModel::onGpsRecoveryAccepted,
             onPermissionRequired = {
                 permissionIssue = currentPermissionIssue()
             },
-            onError = viewModel::onGpsError,
-            onTrackingModeChanged = { effectiveMode ->
-                val requestedMode = preferredTrackingMode
-                trackingMode = effectiveMode
-                if (requestedMode != TrackingMode.HANDHELD && effectiveMode == TrackingMode.HANDHELD) {
-                    preferredTrackingMode = TrackingMode.HANDHELD
-                    getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
-                        .edit()
-                        .putString(TRACKING_MODE_KEY, TrackingMode.HANDHELD.preferenceValue)
-                        .apply()
-                }
-                viewModel.onWarning(
-                    when {
-                        requestedMode != TrackingMode.HANDHELD && effectiveMode == TrackingMode.HANDHELD ->
-                            "Motion sensors unavailable; using GNSS only"
-                        else -> null
-                    }
-                )
+            onError = viewModel::onRepositoryError,
+            onTrackingModeResult = ::acceptTrackingModeResult
+        )
+    }
+
+    private fun acceptTrackingModeResult(result: TrackingModeResult) {
+        if (result.commandId != latestModeCommandId) return
+        effectiveTrackingMode = result.effectiveMode
+        viewModel.onWarning(
+            if (result.requestedMode == TrackingMode.FIXED &&
+                result.effectiveMode == TrackingMode.HANDHELD
+            ) {
+                "Motion sensors unavailable; using GNSS only"
+            } else {
+                null
             }
         )
     }
@@ -263,17 +269,23 @@ class MainActivity : ComponentActivity() {
 
     private fun requestLocationPermission() {
         if (permissionRequestInFlight) return
-        getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(LOCATION_PERMISSION_REQUESTED_KEY, true)
-            .apply()
         permissionRequestInFlight = true
-        requestPermissionLauncher.launch(
-            arrayOf(
-                Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.ACCESS_COARSE_LOCATION
+        runCatching {
+            requestPermissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
             )
-        )
+        }.onSuccess {
+            getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(LOCATION_PERMISSION_REQUESTED_KEY, true)
+                .apply()
+        }.onFailure {
+            permissionRequestInFlight = false
+            permissionIssue = retryPermissionIssue()
+        }
     }
 
     private fun openAppSettings() {
@@ -289,13 +301,25 @@ class MainActivity : ComponentActivity() {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
 
-    private fun currentPermissionIssue(): LocationPermissionIssue =
+    private fun currentPermissionIssue(): LocationPermissionIssue {
+        val preciseRequired = ActivityCompat.checkSelfPermission(
+            this,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        val canRequest = ActivityCompat.shouldShowRequestPermissionRationale(
+            this,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        )
+        return locationPermissionIssue(preciseRequired, canRequest)
+    }
+
+    private fun retryPermissionIssue(): LocationPermissionIssue =
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
             PackageManager.PERMISSION_GRANTED
         ) {
-            LocationPermissionIssue.PRECISE_REQUIRED
+            LocationPermissionIssue.PRECISE_CAN_RETRY
         } else {
-            LocationPermissionIssue.DENIED
+            LocationPermissionIssue.DENIED_CAN_RETRY
         }
 
     private companion object {
@@ -304,12 +328,25 @@ class MainActivity : ComponentActivity() {
         const val TRACKING_MODE_KEY = "tracking_mode"
         const val REFRESH_RATE_KEY = "refresh_rate"
         const val LOCATION_PERMISSION_REQUESTED_KEY = "location_permission_requested"
+        const val PERMISSION_REQUEST_IN_FLIGHT_KEY = "permission_request_in_flight"
     }
 }
 
-private enum class LocationPermissionIssue(val message: String) {
-    DENIED("Location permission is required to measure speed."),
-    PRECISE_REQUIRED("Precise location must be enabled for GPS speed accuracy.")
+internal enum class LocationPermissionIssue(val message: String, val canRequest: Boolean) {
+    DENIED_CAN_RETRY("Location permission is required to measure speed.", true),
+    DENIED_SETTINGS_ONLY("Location permission is required to measure speed.", false),
+    PRECISE_CAN_RETRY("Precise location must be enabled for GPS speed accuracy.", true),
+    PRECISE_SETTINGS_ONLY("Precise location must be enabled for GPS speed accuracy.", false)
+}
+
+internal fun locationPermissionIssue(
+    preciseRequired: Boolean,
+    canRequest: Boolean
+): LocationPermissionIssue = when {
+    preciseRequired && canRequest -> LocationPermissionIssue.PRECISE_CAN_RETRY
+    preciseRequired -> LocationPermissionIssue.PRECISE_SETTINGS_ONLY
+    canRequest -> LocationPermissionIssue.DENIED_CAN_RETRY
+    else -> LocationPermissionIssue.DENIED_SETTINGS_ONLY
 }
 
 @Composable
@@ -322,13 +359,15 @@ fun SpeedometerScreen(
     speedUnit: SpeedUnit,
     trackingMode: TrackingMode,
     refreshRate: RefreshRate,
-    supportsFixedMode: Boolean,
+    trackingModeEnabled: Boolean,
     supportsPip: Boolean,
     permissionMessage: String?,
+    permissionCanRequest: Boolean,
     onSpeedUnitClick: () -> Unit,
     onTrackingModeChange: () -> Unit,
     onRefreshRateChange: () -> Unit,
     onReset: () -> Unit,
+    onRetry: () -> Unit,
     onEnterPip: () -> Unit,
     onRequestPermission: () -> Unit,
     onOpenSettings: () -> Unit
@@ -399,6 +438,7 @@ fun SpeedometerScreen(
         if (permissionMessage != null) {
             PermissionRecovery(
                 message = permissionMessage,
+                canRequest = permissionCanRequest,
                 onRequestPermission = onRequestPermission,
                 onOpenSettings = onOpenSettings,
                 modifier = Modifier.align(Alignment.Center)
@@ -414,6 +454,9 @@ fun SpeedometerScreen(
                     textAlign = TextAlign.Center,
                     fontSize = 20.sp
                 )
+                Button(onClick = onRetry) {
+                    Text("retry")
+                }
             }
         } else {
             if (!isInPipMode) {
@@ -426,27 +469,21 @@ fun SpeedometerScreen(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(117.dp)
+                            .height(96.dp)
                     ) {
-                        Box(
+                        Text(
+                            text = "speedometer v${BuildConfig.VERSION_NAME}",
+                            color = labelColor,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            fontSize = (10f / fontScale).sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp),
-                            contentAlignment = Alignment.BottomCenter
-                        ) {
-                            Text(
-                                text = "speedometer v${BuildConfig.VERSION_NAME}",
-                                color = labelColor,
-                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                fontSize = 14.sp,
-                                maxLines = 1,
-                                modifier = Modifier.padding(vertical = 2.dp)
-                            )
-                        }
+                                .align(Alignment.TopStart)
+                                .fillMaxWidth(0.4f)
+                        )
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .offset(y = 21.dp),
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.Top
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
@@ -523,8 +560,8 @@ fun SpeedometerScreen(
                                     contentDescription = "Tracking mode",
                                     stateDescription = trackingMode.displayLabel,
                                     labelColor = labelColor,
-                                    valueColor = if (supportsFixedMode) primaryColor else labelColor,
-                                    enabled = supportsFixedMode,
+                                    valueColor = if (trackingModeEnabled) primaryColor else labelColor,
+                                    enabled = trackingModeEnabled,
                                     contentAlignment = Alignment.BottomEnd,
                                     onClick = onTrackingModeChange
                                 )
@@ -609,9 +646,11 @@ fun SpeedometerScreen(
                             fontSize = mainSpeedSize, 
                             fontWeight = FontWeight.Bold,
                             letterSpacing = letterSpacing,
-                            color = primaryColor.copy(alpha = placeholderAlpha)
+                            color = primaryColor
                         ),
-                        modifier = Modifier.alignByBaseline()
+                        modifier = Modifier
+                            .alignByBaseline()
+                            .graphicsLayer { alpha = placeholderAlpha.value }
                     )
                     
                     // Decimal Part
@@ -645,6 +684,7 @@ fun SpeedometerScreen(
                                 role = Role.Button,
                                 onClick = onSpeedUnitClick
                             )
+                            .minimumInteractiveComponentSize()
                     )
                 }
 
@@ -705,10 +745,10 @@ fun SpeedometerScreen(
 }
 
 @Composable
-private fun initializationPlaceholderAlpha(enabled: Boolean): Float {
-    if (!enabled) return 1f
+private fun initializationPlaceholderAlpha(enabled: Boolean): State<Float> {
+    if (!enabled) return remember { mutableFloatStateOf(1f) }
     val transition = rememberInfiniteTransition(label = "speed initialization")
-    val alpha by transition.animateFloat(
+    return transition.animateFloat(
         initialValue = 0.3f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
@@ -717,7 +757,6 @@ private fun initializationPlaceholderAlpha(enabled: Boolean): Float {
         ),
         label = "speed placeholder opacity"
     )
-    return alpha
 }
 
 @Composable
@@ -765,6 +804,7 @@ private fun HudSelector(
 @Composable
 private fun PermissionRecovery(
     message: String,
+    canRequest: Boolean,
     onRequestPermission: () -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier
@@ -780,11 +820,14 @@ private fun PermissionRecovery(
             textAlign = TextAlign.Center,
             fontSize = 20.sp
         )
-        Button(onClick = onRequestPermission) {
-            Text("grant location")
-        }
-        Button(onClick = onOpenSettings) {
-            Text("open settings")
+        if (canRequest) {
+            Button(onClick = onRequestPermission) {
+                Text("grant location")
+            }
+        } else {
+            Button(onClick = onOpenSettings) {
+                Text("open settings")
+            }
         }
     }
 }
@@ -865,6 +908,7 @@ private fun StatAction(text: String, color: Color, onClick: () -> Unit) {
         fontSize = 14.sp,
         modifier = Modifier
             .clickable(role = Role.Button, onClick = onClick)
+            .minimumInteractiveComponentSize()
             .padding(horizontal = 8.dp, vertical = 2.dp)
     )
 }
@@ -881,12 +925,12 @@ private fun LiveSpeedTrendChart(
     val targetSpeed = latest?.speedKmh?.takeIf { currentSpeedKmh != null }
 
     if (latest == null || targetSpeed == null) {
-        SpeedTrendChart(samples, null, color, modifier)
+        SpeedTrendChart(samples, rememberUpdatedState<Float?>(null), color, modifier)
         return
     }
 
     key(refreshRate) {
-        val animatedSpeed by animateFloatAsState(
+        val animatedSpeed = animateFloatAsState(
             targetValue = targetSpeed,
             animationSpec = tween(
                 durationMillis = refreshRate.intervalMillis,
@@ -894,115 +938,138 @@ private fun LiveSpeedTrendChart(
             ),
             label = "graph speed"
         )
-        val animatedSamples = samples.toMutableList().apply {
-            this[lastIndex] = latest.copy(speedKmh = animatedSpeed)
-        }
-        SpeedTrendChart(animatedSamples, animatedSpeed, color, modifier)
+        SpeedTrendChart(samples, animatedSpeed, color, modifier)
     }
 }
 
 @Composable
 private fun SpeedTrendChart(
     samples: List<SpeedTrendSample>,
-    currentSpeedKmh: Float?,
+    currentSpeedKmh: State<Float?>,
     color: Color,
     modifier: Modifier = Modifier
 ) {
-    Canvas(modifier = modifier) {
-        val latestTimestamp = samples.lastOrNull()?.timestampNanos ?: return@Canvas
-        val visible = samples.filter { it.timestampNanos >= latestTimestamp - TREND_WINDOW_NANOS }
-        val speeds = visible.mapNotNull(SpeedTrendSample::speedKmh).toMutableList()
-        currentSpeedKmh?.let(speeds::add)
-        if (speeds.isEmpty()) return@Canvas
-
-        val minimum = speeds.minOrNull() ?: return@Canvas
-        val maximum = speeds.maxOrNull() ?: return@Canvas
-        val naturalRange = maximum - minimum
-        val range = max(1f, naturalRange)
-        val lower = max(0f, minimum - range * 0.2f)
-        val upper = maximum + range * 0.2f
-        val verticalRange = max(1f, upper - lower)
-        val startTimestamp = latestTimestamp - TREND_WINDOW_NANOS
-        val brush = Brush.horizontalGradient(
-            colors = listOf(color.copy(alpha = 0.04f), color.copy(alpha = 0.45f), color),
-            startX = 0f,
-            endX = size.width
-        )
-        val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-        val segment = ArrayList<Offset>()
-
-        fun drawCurrentSegment() {
-            if (segment.size < 2) {
-                segment.clear()
-                return
-            }
-            val path = Path().apply { moveTo(segment.first().x, segment.first().y) }
-            if (segment.size == 2) {
-                path.lineTo(segment.last().x, segment.last().y)
-            } else {
-                val slopes = FloatArray(segment.size - 1) { index ->
-                    val dx = segment[index + 1].x - segment[index].x
-                    if (dx == 0f) 0f else (segment[index + 1].y - segment[index].y) / dx
-                }
-                val tangents = FloatArray(segment.size)
-                tangents[0] = slopes.first()
-                tangents[tangents.lastIndex] = slopes.last()
-                for (index in 1 until tangents.lastIndex) {
-                    val before = slopes[index - 1]
-                    val after = slopes[index]
-                    tangents[index] = if (before == 0f || after == 0f || before * after <= 0f) {
-                        0f
-                    } else {
-                        2f * before * after / (before + after)
-                    }
-                }
-                for (index in 0 until segment.lastIndex) {
-                    val start = segment[index]
-                    val end = segment[index + 1]
-                    val dx = end.x - start.x
-                    path.cubicTo(
-                        start.x + dx / 3f,
-                        start.y + tangents[index] * dx / 3f,
-                        end.x - dx / 3f,
-                        end.y - tangents[index + 1] * dx / 3f,
-                        end.x,
-                        end.y
-                    )
-                }
-            }
-            drawPath(path, brush, style = stroke)
-            segment.clear()
-        }
-
-        val pointInset = 7.dp.toPx()
-        val chartRight = max(0f, size.width - pointInset)
-        visible.forEachIndexed { index, sample ->
-            val speedKmh = if (index == visible.lastIndex && currentSpeedKmh != null) {
-                currentSpeedKmh
-            } else {
-                sample.speedKmh
-            }
-            val speed = speedKmh
-            if (speed == null) {
-                drawCurrentSegment()
-                return@forEachIndexed
-            }
-            val x = ((sample.timestampNanos - startTimestamp).toDouble() / TREND_WINDOW_NANOS)
-                .toFloat().coerceIn(0f, 1f) * chartRight
-            val y = (size.height - ((speed - lower) / verticalRange).coerceIn(0f, 1f) * size.height)
-                .coerceIn(pointInset, size.height - pointInset)
-            val point = Offset(x, y)
-            segment += point
-        }
-        drawCurrentSegment()
-
-        val currentSpeed = currentSpeedKmh ?: return@Canvas
-        val currentY = size.height -
-            ((currentSpeed - lower) / verticalRange).coerceIn(0f, 1f) * size.height
-        val currentPoint = Offset(chartRight, currentY.coerceIn(pointInset, size.height - pointInset))
-        drawCircle(color.copy(alpha = 0.22f), radius = pointInset, center = currentPoint)
-        drawCircle(color, radius = 3.5.dp.toPx(), center = currentPoint)
+    val latestTimestamp = samples.lastOrNull()?.timestampNanos
+    val visible = remember(samples, latestTimestamp) {
+        latestTimestamp?.let { latest ->
+            samples.filter { it.timestampNanos >= latest - TREND_WINDOW_NANOS }
+        }.orEmpty()
     }
+    Box(
+        modifier = modifier.drawWithCache {
+            val startTimestamp = (latestTimestamp ?: 0L) - TREND_WINDOW_NANOS
+            val brush = Brush.horizontalGradient(
+                colors = listOf(color.copy(alpha = 0.04f), color.copy(alpha = 0.45f), color),
+                startX = 0f,
+                endX = size.width
+            )
+            val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+            val segment = ArrayList<Offset>(visible.size)
+            val path = Path()
+            val slopes = FloatArray(visible.size.coerceAtLeast(1))
+            val tangents = FloatArray(visible.size.coerceAtLeast(1))
+            val pointInset = 7.dp.toPx()
+            val pointRadius = 3.5.dp.toPx()
+            val chartRight = max(0f, size.width - pointInset)
+
+            onDrawBehind {
+                val currentSpeed = currentSpeedKmh.value
+                var minimum = Float.POSITIVE_INFINITY
+                var maximum = Float.NEGATIVE_INFINITY
+                visible.forEachIndexed { index, sample ->
+                    val speed = if (index == visible.lastIndex && currentSpeed != null) {
+                        currentSpeed
+                    } else {
+                        sample.speedKmh
+                    } ?: return@forEachIndexed
+                    minimum = minOf(minimum, speed)
+                    maximum = maxOf(maximum, speed)
+                }
+                if (!minimum.isFinite() || !maximum.isFinite()) return@onDrawBehind
+
+                val range = max(1f, maximum - minimum)
+                val lower = max(0f, minimum - range * 0.2f)
+                val upper = maximum + range * 0.2f
+                val verticalRange = max(1f, upper - lower)
+
+                fun drawCurrentSegment() {
+                    if (segment.size < 2) {
+                        segment.clear()
+                        return
+                    }
+                    path.reset()
+                    path.moveTo(segment.first().x, segment.first().y)
+                    if (segment.size == 2) {
+                        path.lineTo(segment.last().x, segment.last().y)
+                    } else {
+                        for (index in 0 until segment.lastIndex) {
+                            val dx = segment[index + 1].x - segment[index].x
+                            slopes[index] = if (dx == 0f) {
+                                0f
+                            } else {
+                                (segment[index + 1].y - segment[index].y) / dx
+                            }
+                        }
+                        tangents[0] = slopes[0]
+                        tangents[segment.lastIndex] = slopes[segment.lastIndex - 1]
+                        for (index in 1 until segment.lastIndex) {
+                            val before = slopes[index - 1]
+                            val after = slopes[index]
+                            tangents[index] = if (before == 0f || after == 0f || before * after <= 0f) {
+                                0f
+                            } else {
+                                2f * before * after / (before + after)
+                            }
+                        }
+                        for (index in 0 until segment.lastIndex) {
+                            val start = segment[index]
+                            val end = segment[index + 1]
+                            val dx = end.x - start.x
+                            path.cubicTo(
+                                start.x + dx / 3f,
+                                start.y + tangents[index] * dx / 3f,
+                                end.x - dx / 3f,
+                                end.y - tangents[index + 1] * dx / 3f,
+                                end.x,
+                                end.y
+                            )
+                        }
+                    }
+                    drawPath(path, brush, style = stroke)
+                    segment.clear()
+                }
+
+                visible.forEachIndexed { index, sample ->
+                    val speed = if (index == visible.lastIndex && currentSpeed != null) {
+                        currentSpeed
+                    } else {
+                        sample.speedKmh
+                    }
+                    if (speed == null) {
+                        drawCurrentSegment()
+                        return@forEachIndexed
+                    }
+                    val x = ((sample.timestampNanos - startTimestamp).toDouble() / TREND_WINDOW_NANOS)
+                        .toFloat().coerceIn(0f, 1f) * chartRight
+                    val y = (size.height -
+                        ((speed - lower) / verticalRange).coerceIn(0f, 1f) * size.height)
+                        .coerceIn(pointInset, size.height - pointInset)
+                    segment += Offset(x, y)
+                }
+                drawCurrentSegment()
+
+                currentSpeed ?: return@onDrawBehind
+                val currentY = size.height -
+                    ((currentSpeed - lower) / verticalRange).coerceIn(0f, 1f) * size.height
+                val currentPoint = Offset(
+                    chartRight,
+                    currentY.coerceIn(pointInset, size.height - pointInset)
+                )
+                drawCircle(color.copy(alpha = 0.22f), radius = pointInset, center = currentPoint)
+                drawCircle(color, radius = pointRadius, center = currentPoint)
+            }
+        }
+    )
 }
 
 private val TrackingMode.displayLabel: String

@@ -18,6 +18,7 @@ import androidx.core.content.ContextCompat
 
 internal interface RepositoryWorker {
     fun post(block: () -> Unit): Boolean
+    fun postIfRunning(block: () -> Unit): Boolean
     fun postDelayed(runnable: Runnable, delayMillis: Long)
     fun removeCallbacks(runnable: Runnable)
     fun elapsedRealtimeNanos(): Long
@@ -38,6 +39,7 @@ internal interface RepositoryLocationGateway {
 
 internal interface RepositoryMotionGateway {
     val supportsFixedMode: Boolean
+    // A failed registration must clean up any listener registered during the attempt.
     fun register(listener: SensorEventListener): Boolean
     fun unregister(listener: SensorEventListener)
 }
@@ -65,37 +67,64 @@ internal fun productionRepositoryDependencies(context: Context): RepositoryDepen
         locationGateway = AndroidRepositoryLocationGateway(
             applicationContext,
             locationManager,
-            worker.handler
+            worker::handler
         ),
-        motionGateway = AndroidRepositoryMotionGateway(sensorManager, worker.handler)
+        motionGateway = AndroidRepositoryMotionGateway(sensorManager, worker::handler)
     )
 }
 
 private class HandlerRepositoryWorker : RepositoryWorker {
-    private val thread = HandlerThread("speed-sensors").apply { start() }
-    val handler = Handler(thread.looper)
+    private val lock = Any()
+    private var thread: HandlerThread? = null
+    private var workerHandler: Handler? = null
+    private var closed = false
 
-    override fun post(block: () -> Unit): Boolean = handler.post(block)
+    fun handler(): Handler = requireNotNull(handlerOrNull())
+
+    override fun post(block: () -> Unit): Boolean = handlerOrNull()?.post(block) == true
+
+    override fun postIfRunning(block: () -> Unit): Boolean {
+        val handler = synchronized(lock) {
+            if (closed) null else workerHandler
+        } ?: return false
+        return handler.post(block)
+    }
 
     override fun postDelayed(runnable: Runnable, delayMillis: Long) {
-        handler.postDelayed(runnable, delayMillis)
+        handlerOrNull()?.postDelayed(runnable, delayMillis)
     }
 
     override fun removeCallbacks(runnable: Runnable) {
-        handler.removeCallbacks(runnable)
+        synchronized(lock) { workerHandler }?.removeCallbacks(runnable)
     }
 
     override fun elapsedRealtimeNanos(): Long = SystemClock.elapsedRealtimeNanos()
 
     override fun close() {
-        thread.quitSafely()
+        val threadToClose = synchronized(lock) {
+            if (closed) return
+            closed = true
+            workerHandler = null
+            thread.also { thread = null }
+        }
+        threadToClose?.quitSafely()
+    }
+
+    private fun handlerOrNull(): Handler? = synchronized(lock) {
+        if (closed) return@synchronized null
+        workerHandler ?: Handler(
+            HandlerThread("speed-sensors").also {
+                it.start()
+                thread = it
+            }.looper
+        ).also { workerHandler = it }
     }
 }
 
 private class AndroidRepositoryLocationGateway(
     private val context: Context,
     private val locationManager: LocationManager,
-    private val workerHandler: Handler
+    private val workerHandler: () -> Handler
 ) : RepositoryLocationGateway {
     override fun hasFineLocationPermission(): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
@@ -108,13 +137,13 @@ private class AndroidRepositoryLocationGateway(
             0L,
             0f,
             listener,
-            workerHandler.looper
+            workerHandler().looper
         )
     }
 
     @SuppressLint("MissingPermission")
     override fun registerGnssStatusCallback(callback: GnssStatus.Callback): Boolean =
-        locationManager.registerGnssStatusCallback(callback, workerHandler)
+        locationManager.registerGnssStatusCallback(callback, workerHandler())
 
     override fun removeLocationUpdates(listener: LocationListener) {
         locationManager.removeUpdates(listener)
@@ -127,7 +156,7 @@ private class AndroidRepositoryLocationGateway(
 
 private class AndroidRepositoryMotionGateway(
     private val sensorManager: SensorManager,
-    private val workerHandler: Handler
+    private val workerHandler: () -> Handler
 ) : RepositoryMotionGateway {
     private val linearAccelerationSensor =
         sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
@@ -144,13 +173,13 @@ private class AndroidRepositoryMotionGateway(
                 listener,
                 linearAccelerationSensor,
                 SENSOR_PERIOD_MICROSECONDS,
-                workerHandler
+                workerHandler()
             )
             val rotationRegistered = sensorManager.registerListener(
                 listener,
                 requireNotNull(rotationVectorSensor),
                 SENSOR_PERIOD_MICROSECONDS,
-                workerHandler
+                workerHandler()
             )
             complete = accelerationRegistered && rotationRegistered
             return complete

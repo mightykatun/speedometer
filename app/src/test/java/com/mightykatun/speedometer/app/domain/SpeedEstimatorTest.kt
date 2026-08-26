@@ -14,6 +14,38 @@ import org.junit.Test
 
 class SpeedEstimatorTest {
     @Test
+    fun `GNSS ingestion reports only accepted correction timestamps`() {
+        val estimator = SpeedEstimator()
+
+        assertEquals(seconds(1), estimator.ingestGnssMeasurement(gnss(10.0, 0.1, seconds(1))))
+        assertNull(estimator.ingestGnssMeasurement(gnss(10.0, 0.1, seconds(1))))
+        assertNull(estimator.ingestGnssMeasurement(gnss(10.0, 3.0, seconds(2))))
+        assertNull(estimator.ingestGnssMeasurement(gnss(null, 0.1, seconds(3))))
+    }
+
+    @Test
+    fun `accepted delayed GNSS reports its measurement timestamp`() {
+        val estimator = SpeedEstimator()
+        estimator.ingestGnssMeasurement(gnss(10.0, 0.1, seconds(1)))
+        estimator.ingestGnssMeasurement(gnss(10.0, 0.1, seconds(3)))
+
+        assertEquals(seconds(2), estimator.ingestGnssMeasurement(gnss(10.0, 0.1, seconds(2))))
+    }
+
+    @Test
+    fun `delayed replay reports a later correction that becomes accepted`() {
+        val estimator = SpeedEstimator()
+        estimator.ingestGnssMeasurement(gnss(10.0, 0.1, seconds(10)))
+        assertNull(estimator.ingestGnssMeasurement(gnss(20.0, 0.1, seconds(12))))
+
+        val acceptedTimestamp = estimator.ingestGnssMeasurement(
+            gnss(20.0, 0.1, seconds(11))
+        )
+
+        assertEquals(seconds(12), acceptedTimestamp)
+    }
+
+    @Test
     fun `valid low speeds remain visible without a floor`() {
         listOf(0.01, 0.1, 0.2, 0.5, 1.0).forEach { speed ->
             val estimate = SpeedEstimator().onGnssMeasurement(gnss(speed, 0.1, seconds(1)))

@@ -2,6 +2,7 @@ package com.mightykatun.speedometer.app
 
 import com.mightykatun.speedometer.app.domain.SessionStatisticsTracker
 import com.mightykatun.speedometer.app.domain.MonotonicClock
+import com.mightykatun.speedometer.app.data.repository.RepositoryError
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
 import com.mightykatun.speedometer.app.domain.model.MaximumCandidate
 import com.mightykatun.speedometer.app.domain.model.MaximumCandidateChange
@@ -43,7 +44,7 @@ class SpeedometerViewModelTest {
     }
 
     @Test
-    fun `provider recovery waits for a fresh GNSS measurement`() {
+    fun `provider recovery unmasks only the correlated accepted estimate`() {
         whenever(clock.elapsedRealtimeMillis()).thenReturn(0L, 1000L)
         viewModel.onSessionStart()
         viewModel.onSatelliteCountReceived(6)
@@ -51,7 +52,7 @@ class SpeedometerViewModelTest {
             estimate(12.0, EstimateQuality.TRACKING, timestampNanos = 10_000_000_000L)
         )
 
-        viewModel.onGpsError("gps provider disabled")
+        viewModel.onRepositoryError(RepositoryError.GPS_PROVIDER_DISABLED)
 
         viewModel.onSpeedEstimateReceived(
             estimate(12.0, EstimateQuality.TRACKING, timestampNanos = 12_000_000_000L)
@@ -69,23 +70,14 @@ class SpeedometerViewModelTest {
         viewModel.onGpsProviderEnabled()
         viewModel.onRefreshRateChanged(RefreshRate.TWO_SECONDS)
         assertNull(viewModel.state.currentSpeedKmh)
-        viewModel.onSpeedEstimateReceived(
-            estimate(12.0, EstimateQuality.TRACKING, timestampNanos = 11_000_000_000L)
-        )
-
         assertNull(viewModel.signalMessage)
         assertNull(viewModel.state.currentSpeedKmh)
 
-        viewModel.onGpsAvailable()
-        viewModel.onRefreshRateChanged(RefreshRate.ONE_SECOND)
-        assertNull(viewModel.state.currentSpeedKmh)
-        viewModel.onSpeedEstimateReceived(
-            estimate(12.0, EstimateQuality.TRACKING, timestampNanos = 11_500_000_000L)
-        )
-        assertNull(viewModel.state.currentSpeedKmh)
         viewModel.onSpeedEstimateReceived(
             estimate(12.0, EstimateQuality.TRACKING, timestampNanos = 13_000_000_000L)
         )
+        assertNull(viewModel.state.currentSpeedKmh)
+        viewModel.onGpsRecoveryAccepted()
 
         assertEquals(43.2f, viewModel.state.currentSpeedKmh!!, 0.001f)
     }
@@ -109,9 +101,9 @@ class SpeedometerViewModelTest {
 
     @Test
     fun `other GPS errors remain blocking errors`() {
-        viewModel.onGpsError("Unable to monitor GNSS status")
+        viewModel.onRepositoryError(RepositoryError.RETRYABLE_STARTUP_FAILURE)
 
-        assertEquals("Unable to monitor GNSS status", viewModel.errorMessage)
+        assertEquals("Unable to start GPS", viewModel.errorMessage)
         assertNull(viewModel.signalMessage)
     }
 

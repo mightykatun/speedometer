@@ -209,11 +209,9 @@ class SessionStatisticsTrackerTest {
         tracker.startSession()
 
         tracker.updateSatelliteCount(7)
-        val stats = tracker.updateSatelliteCount(4)
+        val maxSatellites = tracker.updateSatelliteCount(4)
 
-        assertNull(stats.currentSpeedKmh)
-        assertEquals(4, stats.currentSatellites)
-        assertEquals(7, stats.maxSatellites)
+        assertEquals(7, maxSatellites)
     }
 
     private fun update(

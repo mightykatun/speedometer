@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
+import com.mightykatun.speedometer.app.data.repository.RepositoryError
 import com.mightykatun.speedometer.app.domain.SessionStatisticsTracker
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
 import com.mightykatun.speedometer.app.domain.model.RefreshRate
@@ -18,7 +19,6 @@ class SpeedometerViewModel(
     private var sessionActive = false
     private var gpsErrorActive = false
     private var waitingForFreshGnss = false
-    private var freshGnssReceived = false
     private var refreshRate = RefreshRate.ONE_SECOND
     private var latestPresentation: PendingPresentation? = null
     private var latestMaxSpeedKmh = 0f
@@ -57,18 +57,12 @@ class SpeedometerViewModel(
         if (acceptedForPresentation) {
             latestPresentation = candidate
         }
-        if (freshGnssReceived && acceptedForPresentation) {
-            freshGnssReceived = false
-            waitingForFreshGnss = false
-        }
         publishPresentationIfDue()
     }
 
     fun onSatelliteCountReceived(satelliteCount: Int) {
-        val stats = sessionTracker.updateSatelliteCount(satelliteCount)
-        latestMaxSpeedKmh = stats.maxSpeedKmh
-        latestSatelliteCount = stats.currentSatellites
-        latestMaxSatelliteCount = stats.maxSatellites
+        latestSatelliteCount = satelliteCount
+        latestMaxSatelliteCount = sessionTracker.updateSatelliteCount(satelliteCount)
         if (satelliteCount == 0 && state.satelliteCount != 0) {
             state = state.copy(satelliteCount = 0)
         }
@@ -95,7 +89,6 @@ class SpeedometerViewModel(
         signalMessage = null
         gpsErrorActive = false
         waitingForFreshGnss = false
-        freshGnssReceived = false
         latestPresentation = null
         latestMaxSpeedKmh = 0f
         latestSatelliteCount = 0
@@ -103,34 +96,28 @@ class SpeedometerViewModel(
         lastPresentationTimestampNanos = 0L
     }
 
-    fun onError(message: String) {
-        gpsErrorActive = false
-        waitingForFreshGnss = false
-        freshGnssReceived = false
-        signalMessage = null
-        errorMessage = message
-    }
-
-    fun onGpsError(message: String) {
-        gpsErrorActive = true
-        if (message == GPS_PROVIDER_DISABLED_MESSAGE) {
-            errorMessage = null
-            signalMessage = message
-            waitingForFreshGnss = true
-            freshGnssReceived = false
-            val stats = sessionTracker.updateSatelliteCount(0)
-            latestMaxSpeedKmh = stats.maxSpeedKmh
-            latestSatelliteCount = stats.currentSatellites
-            latestMaxSatelliteCount = stats.maxSatellites
-            state = state.copy(
-                currentSpeedKmh = null,
-                speedAccuracyKmh = null,
-                estimateQuality = EstimateQuality.UNAVAILABLE,
-                satelliteCount = 0
-            )
-        } else {
-            signalMessage = null
-            errorMessage = message
+    fun onRepositoryError(error: RepositoryError) {
+        when (error) {
+            RepositoryError.GPS_PROVIDER_DISABLED -> {
+                gpsErrorActive = true
+                errorMessage = null
+                signalMessage = GPS_PROVIDER_DISABLED_MESSAGE
+                waitingForFreshGnss = true
+                latestSatelliteCount = 0
+                latestMaxSatelliteCount = sessionTracker.updateSatelliteCount(0)
+                state = state.copy(
+                    currentSpeedKmh = null,
+                    speedAccuracyKmh = null,
+                    estimateQuality = EstimateQuality.UNAVAILABLE,
+                    satelliteCount = 0
+                )
+            }
+            RepositoryError.RETRYABLE_STARTUP_FAILURE -> {
+                gpsErrorActive = false
+                waitingForFreshGnss = false
+                signalMessage = null
+                errorMessage = GPS_STARTUP_ERROR_MESSAGE
+            }
         }
     }
 
@@ -145,13 +132,13 @@ class SpeedometerViewModel(
         }
     }
 
-    fun onGpsAvailable() {
-        if (waitingForFreshGnss) freshGnssReceived = true
-        if (gpsErrorActive) {
-            gpsErrorActive = false
-            errorMessage = null
-            signalMessage = null
-        }
+    fun onGpsRecoveryAccepted() {
+        if (!waitingForFreshGnss) return
+        waitingForFreshGnss = false
+        gpsErrorActive = false
+        errorMessage = null
+        signalMessage = null
+        publishPresentationIfDue(force = true)
     }
 
     private fun publishPresentationIfDue(force: Boolean = false) {
@@ -220,6 +207,7 @@ class SpeedometerViewModel(
 
     private companion object {
         const val GPS_PROVIDER_DISABLED_MESSAGE = "gps provider disabled"
+        const val GPS_STARTUP_ERROR_MESSAGE = "Unable to start GPS"
         const val TREND_WINDOW_NANOS = 30_000_000_000L
         const val MAX_TREND_SAMPLES = 360
     }
