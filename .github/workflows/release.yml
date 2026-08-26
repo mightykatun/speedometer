@@ -92,11 +92,58 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          manifest="app/build/intermediates/merged_manifest/release/processReleaseMainManifest/AndroidManifest.xml"
-          test -f "$manifest"
-          perl -0777 -ne 'exit(/android:allowBackup="false"/ ? 0 : 1)' "$manifest"
-          perl -0777 -ne 'exit(/android:dataExtractionRules="@xml\/data_extraction_rules"/ ? 0 : 1)' "$manifest"
-          perl -0777 -ne 'exit(/android:fullBackupContent="@xml\/backup_rules"/ ? 0 : 1)' "$manifest"
+          apk="app/build/outputs/apk/release/app-release-unsigned.apk"
+          aapt2="$ANDROID_HOME/build-tools/35.0.0/aapt2"
+          manifest_dump="$RUNNER_TEMP/release-manifest.txt"
+          resources_dump="$RUNNER_TEMP/release-resources.txt"
+
+          for required_file in "$apk" "$aapt2"; do
+            if ! test -f "$required_file"; then
+              printf 'Required release privacy input is missing: %s\n' "$required_file" >&2
+              exit 1
+            fi
+          done
+
+          "$aapt2" dump xmltree --file AndroidManifest.xml "$apk" > "$manifest_dump"
+          "$aapt2" dump resources "$apk" > "$resources_dump"
+
+          require_text() {
+            local file="$1"
+            local text="$2"
+            local message="$3"
+            if ! EXPECTED_TEXT="$text" \
+              perl -0777 -ne 'exit(index($_, $ENV{EXPECTED_TEXT}) >= 0 ? 0 : 1)' "$file"; then
+              printf '%s\n' "$message" >&2
+              exit 1
+            fi
+          }
+
+          require_text \
+            "$manifest_dump" \
+            ':allowBackup(0x01010280)=false' \
+            'Release APK must set android:allowBackup="false".'
+
+          full_backup_id="$(
+            perl -ne 'print lc($1) if /:fullBackupContent\([^)]*\)=@(0x[0-9a-fA-F]+)/' \
+              "$manifest_dump"
+          )"
+          data_extraction_id="$(
+            perl -ne 'print lc($1) if /:dataExtractionRules\([^)]*\)=@(0x[0-9a-fA-F]+)/' \
+              "$manifest_dump"
+          )"
+          if test -z "$full_backup_id" || test -z "$data_extraction_id"; then
+            echo 'Release APK must declare both Android backup-rule attributes.' >&2
+            exit 1
+          fi
+          require_text \
+            "$resources_dump" \
+            "resource $full_backup_id xml/backup_rules" \
+            'android:fullBackupContent must reference @xml/backup_rules.'
+          require_text \
+            "$resources_dump" \
+            "resource $data_extraction_id xml/data_extraction_rules" \
+            'android:dataExtractionRules must reference @xml/data_extraction_rules.'
+
           for permission in \
             android.permission.INTERNET \
             android.permission.ACCESS_BACKGROUND_LOCATION \
@@ -105,8 +152,8 @@ jobs:
             android.permission.MANAGE_EXTERNAL_STORAGE; do
             if FORBIDDEN_PERMISSION="$permission" \
               perl -ne '$found = 1 if index($_, $ENV{FORBIDDEN_PERMISSION}) >= 0; END { exit($found ? 0 : 1) }' \
-              "$manifest"; then
-              printf 'Forbidden permission in merged release manifest: %s\n' "$permission" >&2
+              "$manifest_dump"; then
+              printf 'Forbidden permission in release APK: %s\n' "$permission" >&2
               exit 1
             fi
           done
