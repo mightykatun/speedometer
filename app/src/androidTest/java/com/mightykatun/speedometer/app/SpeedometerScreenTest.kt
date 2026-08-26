@@ -57,7 +57,8 @@ class SpeedometerScreenTest {
             )
         }
 
-        composeRule.onNodeWithText("speedometer v${BuildConfig.VERSION_NAME}").assertIsDisplayed()
+        composeRule.onNodeWithText("speedometer").assertIsDisplayed()
+        composeRule.onNodeWithText("v${BuildConfig.VERSION_NAME}").assertIsDisplayed()
         composeRule.onNodeWithText("--").assertIsDisplayed()
         composeRule.onNodeWithText("km/h")
             .assertWidthIsAtLeast(48.dp)

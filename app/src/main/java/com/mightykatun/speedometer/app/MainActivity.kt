@@ -53,6 +53,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 
 import com.mightykatun.speedometer.app.di.SpeedometerViewModelFactory
 import com.mightykatun.speedometer.app.data.repository.TrackingModeResult
@@ -96,6 +99,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        hideSystemBars()
         permissionRequestInFlight = savedInstanceState?.getBoolean(PERMISSION_REQUEST_IN_FLIGHT_KEY) == true
         val preferences = getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
         speedUnit = SpeedUnit.fromPreference(preferences.getString(SPEED_UNIT_KEY, null))
@@ -144,6 +148,11 @@ class MainActivity : ComponentActivity() {
                 onOpenSettings = { openAppSettings() }
             )
         }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideSystemBars()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -300,6 +309,15 @@ class MainActivity : ComponentActivity() {
     private fun supportsPictureInPicture(): Boolean =
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+    private fun hideSystemBars() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
 
     private fun currentPermissionIssue(): LocationPermissionIssue {
         val preciseRequired = ActivityCompat.checkSelfPermission(
@@ -472,14 +490,26 @@ fun SpeedometerScreen(
                             .height(96.dp)
                     ) {
                         Text(
-                            text = "speedometer v${BuildConfig.VERSION_NAME}",
+                            text = "speedometer",
                             color = labelColor,
                             fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                            fontSize = (10f / fontScale).sp,
+                            fontSize = (12f / fontScale).sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier
                                 .align(Alignment.TopStart)
+                                .fillMaxWidth(0.4f)
+                        )
+                        Text(
+                            text = "v${BuildConfig.VERSION_NAME}",
+                            color = labelColor,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            fontSize = (12f / fontScale).sp,
+                            textAlign = TextAlign.End,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
                                 .fillMaxWidth(0.4f)
                         )
                         Row(
@@ -634,8 +664,8 @@ fun SpeedometerScreen(
                 val parts = formattedSpeed?.split(".")
                 val intPart = parts?.get(0) ?: "--"
                 val decPart = parts?.getOrNull(1)
-                val placeholderAlpha = initializationPlaceholderAlpha(
-                    enabled = displayedQuality == EstimateQuality.ACQUIRING
+                val placeholderAlpha = speedPlaceholderAlpha(
+                    enabled = intPart == "--"
                 )
 
                 Row {
@@ -745,9 +775,9 @@ fun SpeedometerScreen(
 }
 
 @Composable
-private fun initializationPlaceholderAlpha(enabled: Boolean): State<Float> {
+private fun speedPlaceholderAlpha(enabled: Boolean): State<Float> {
     if (!enabled) return remember { mutableFloatStateOf(1f) }
-    val transition = rememberInfiniteTransition(label = "speed initialization")
+    val transition = rememberInfiniteTransition(label = "speed unavailable")
     return transition.animateFloat(
         initialValue = 0.3f,
         targetValue = 1f,
