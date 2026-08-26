@@ -423,108 +423,123 @@ fun SpeedometerScreen(
                         .fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text(
-                        text = "speedometer v${BuildConfig.VERSION_NAME}",
-                        color = labelColor,
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                        fontSize = 14.sp,
-                        maxLines = 1
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.Top
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(117.dp)
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Box(
-                                modifier = Modifier.height(48.dp),
-                                contentAlignment = Alignment.BottomStart
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(vertical = 2.dp),
-                                    verticalAlignment = Alignment.CenterVertically
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp),
+                            contentAlignment = Alignment.BottomCenter
+                        ) {
+                            Text(
+                                text = "speedometer v${BuildConfig.VERSION_NAME}",
+                                color = labelColor,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                fontSize = 14.sp,
+                                maxLines = 1,
+                                modifier = Modifier.padding(vertical = 2.dp)
+                            )
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .offset(y = 21.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Box(
+                                    modifier = Modifier.height(48.dp),
+                                    contentAlignment = Alignment.BottomStart
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(10.dp)
-                                            .background(
-                                                if (compactWarning != null) Color(0xFFFFA000) else statusColor,
-                                                shape = androidx.compose.foundation.shape.CircleShape
+                                    Row(
+                                        modifier = Modifier.padding(vertical = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(10.dp)
+                                                .background(
+                                                    if (compactWarning != null) Color(0xFFFFA000) else statusColor,
+                                                    shape = androidx.compose.foundation.shape.CircleShape
+                                                )
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        if (compactWarning != null) {
+                                            Text(
+                                                text = compactWarning,
+                                                color = primaryColor,
+                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 11.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.semantics {
+                                                    contentDescription = compactWarning
+                                                }
                                             )
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    if (compactWarning != null) {
-                                        Text(
-                                            text = compactWarning,
-                                            color = primaryColor,
-                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 11.sp,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.semantics {
-                                                contentDescription = compactWarning
-                                            }
-                                        )
-                                    } else {
-                                        Text(
-                                            text = "satellites: ",
-                                            color = labelColor,
-                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                            fontSize = 14.sp,
-                                            maxLines = 1
-                                        )
-                                        Text(
-                                            text = "$displayedSatelliteCount",
-                                            color = primaryColor,
-                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 14.sp,
-                                            maxLines = 1
+                                        } else {
+                                            Text(
+                                                text = "satellites: ",
+                                                color = labelColor,
+                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                                fontSize = 14.sp,
+                                                maxLines = 1
+                                            )
+                                            Text(
+                                                text = "$displayedSatelliteCount",
+                                                color = primaryColor,
+                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 14.sp,
+                                                maxLines = 1
+                                            )
+                                        }
+                                    }
+                                }
+                                if (compactActions) {
+                                    Box(
+                                        modifier = Modifier.height(48.dp),
+                                        contentAlignment = Alignment.CenterStart
+                                    ) {
+                                        AccuracyIndicator(
+                                            quality = displayedQuality,
+                                            speed = currentSpeed,
+                                            accuracy = currentAccuracy,
+                                            unit = speedUnit.label,
+                                            isInPipMode = false,
+                                            unavailableText = unavailableText
                                         )
                                     }
                                 }
                             }
-                            if (compactActions) {
-                                Box(
-                                    modifier = Modifier.height(48.dp),
-                                    contentAlignment = Alignment.CenterStart
-                                ) {
-                                    AccuracyIndicator(
-                                        quality = displayedQuality,
-                                        speed = currentSpeed,
-                                        accuracy = currentAccuracy,
-                                        unit = speedUnit.label,
-                                        isInPipMode = false,
-                                        unavailableText = unavailableText
-                                    )
-                                }
-                            }
-                        }
 
-                        Column(horizontalAlignment = Alignment.End) {
-                            HudSelector(
-                                label = "mode",
-                                value = trackingMode.displayLabel,
-                                contentDescription = "Tracking mode",
-                                stateDescription = trackingMode.displayLabel,
-                                labelColor = labelColor,
-                                valueColor = if (supportsFixedMode) primaryColor else labelColor,
-                                enabled = supportsFixedMode,
-                                contentAlignment = Alignment.BottomEnd,
-                                onClick = onTrackingModeChange
-                            )
-                            HudSelector(
-                                label = "refresh",
-                                value = refreshRate.displayLabel,
-                                contentDescription = "Refresh rate",
-                                stateDescription = refreshRate.accessibilityLabel,
-                                labelColor = labelColor,
-                                valueColor = primaryColor,
-                                enabled = true,
-                                contentAlignment = Alignment.TopEnd,
-                                onClick = onRefreshRateChange
-                            )
+                            Column(horizontalAlignment = Alignment.End) {
+                                HudSelector(
+                                    label = "mode",
+                                    value = trackingMode.displayLabel,
+                                    contentDescription = "Tracking mode",
+                                    stateDescription = trackingMode.displayLabel,
+                                    labelColor = labelColor,
+                                    valueColor = if (supportsFixedMode) primaryColor else labelColor,
+                                    enabled = supportsFixedMode,
+                                    contentAlignment = Alignment.BottomEnd,
+                                    onClick = onTrackingModeChange
+                                )
+                                HudSelector(
+                                    label = "refresh",
+                                    value = refreshRate.displayLabel,
+                                    contentDescription = "Refresh rate",
+                                    stateDescription = refreshRate.accessibilityLabel,
+                                    labelColor = labelColor,
+                                    valueColor = primaryColor,
+                                    enabled = true,
+                                    contentAlignment = Alignment.TopEnd,
+                                    onClick = onRefreshRateChange
+                                )
+                            }
                         }
                     }
                     if (warning != null && !compactLayout) {
