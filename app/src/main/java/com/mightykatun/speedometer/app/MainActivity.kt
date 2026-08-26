@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Rational
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -99,6 +100,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         hideSystemBars()
         permissionRequestInFlight = savedInstanceState?.getBoolean(PERMISSION_REQUEST_IN_FLIGHT_KEY) == true
         val preferences = getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
@@ -484,129 +486,103 @@ fun SpeedometerScreen(
                         .fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Box(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(96.dp)
                     ) {
-                        Text(
-                            text = "speedometer",
-                            color = labelColor,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                            fontSize = (12f / fontScale).sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier
-                                .align(Alignment.TopStart)
-                                .fillMaxWidth(0.4f)
-                        )
-                        Text(
-                            text = "v${BuildConfig.VERSION_NAME}",
-                            color = labelColor,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                            fontSize = (12f / fontScale).sp,
-                            textAlign = TextAlign.End,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .fillMaxWidth(0.4f)
-                        )
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp),
+                            verticalAlignment = Alignment.Bottom
+                        ) {
+                            Text(
+                                text = "speedometer v${BuildConfig.VERSION_NAME}",
+                                color = labelColor,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                fontSize = 14.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(vertical = 2.dp)
+                            )
+                            HudSelector(
+                                label = "mode",
+                                value = trackingMode.displayLabel,
+                                contentDescription = "Tracking mode",
+                                stateDescription = trackingMode.displayLabel,
+                                labelColor = labelColor,
+                                valueColor = if (trackingModeEnabled) primaryColor else labelColor,
+                                enabled = trackingModeEnabled,
+                                contentAlignment = Alignment.BottomEnd,
+                                onClick = onTrackingModeChange
+                            )
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp),
                             verticalAlignment = Alignment.Top
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Box(
-                                    modifier = Modifier.height(48.dp),
-                                    contentAlignment = Alignment.BottomStart
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(vertical = 2.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(10.dp)
-                                                .background(
-                                                    if (compactWarning != null) Color(0xFFFFA000) else statusColor,
-                                                    shape = androidx.compose.foundation.shape.CircleShape
-                                                )
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .background(
+                                            if (compactWarning != null) Color(0xFFFFA000) else statusColor,
+                                            shape = androidx.compose.foundation.shape.CircleShape
                                         )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        if (compactWarning != null) {
-                                            Text(
-                                                text = compactWarning,
-                                                color = primaryColor,
-                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 11.sp,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                modifier = Modifier.semantics {
-                                                    contentDescription = compactWarning
-                                                }
-                                            )
-                                        } else {
-                                            Text(
-                                                text = "satellites: ",
-                                                color = labelColor,
-                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                                fontSize = 14.sp,
-                                                maxLines = 1
-                                            )
-                                            Text(
-                                                text = "$displayedSatelliteCount",
-                                                color = primaryColor,
-                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 14.sp,
-                                                maxLines = 1
-                                            )
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                if (compactWarning != null) {
+                                    Text(
+                                        text = compactWarning,
+                                        color = primaryColor,
+                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.semantics {
+                                            contentDescription = compactWarning
                                         }
-                                    }
-                                }
-                                if (compactActions) {
-                                    Box(
-                                        modifier = Modifier.height(48.dp),
-                                        contentAlignment = Alignment.CenterStart
-                                    ) {
-                                        AccuracyIndicator(
-                                            quality = displayedQuality,
-                                            speed = currentSpeed,
-                                            accuracy = currentAccuracy,
-                                            unit = speedUnit.label,
-                                            isInPipMode = false,
-                                            unavailableText = unavailableText
-                                        )
-                                    }
+                                    )
+                                } else {
+                                    Text(
+                                        text = "satellites: ",
+                                        color = labelColor,
+                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                        fontSize = 14.sp,
+                                        maxLines = 1
+                                    )
+                                    Text(
+                                        text = "$displayedSatelliteCount",
+                                        color = primaryColor,
+                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp,
+                                        maxLines = 1
+                                    )
                                 }
                             }
-
-                            Column(horizontalAlignment = Alignment.End) {
-                                HudSelector(
-                                    label = "mode",
-                                    value = trackingMode.displayLabel,
-                                    contentDescription = "Tracking mode",
-                                    stateDescription = trackingMode.displayLabel,
-                                    labelColor = labelColor,
-                                    valueColor = if (trackingModeEnabled) primaryColor else labelColor,
-                                    enabled = trackingModeEnabled,
-                                    contentAlignment = Alignment.BottomEnd,
-                                    onClick = onTrackingModeChange
-                                )
-                                HudSelector(
-                                    label = "refresh",
-                                    value = refreshRate.displayLabel,
-                                    contentDescription = "Refresh rate",
-                                    stateDescription = refreshRate.accessibilityLabel,
-                                    labelColor = labelColor,
-                                    valueColor = primaryColor,
-                                    enabled = true,
-                                    contentAlignment = Alignment.TopEnd,
-                                    onClick = onRefreshRateChange
-                                )
-                            }
+                            HudSelector(
+                                label = "refresh",
+                                value = refreshRate.displayLabel,
+                                contentDescription = "Refresh rate",
+                                stateDescription = refreshRate.accessibilityLabel,
+                                labelColor = labelColor,
+                                valueColor = primaryColor,
+                                enabled = true,
+                                contentAlignment = Alignment.TopEnd,
+                                onClick = onRefreshRateChange
+                            )
                         }
                     }
                     if (warning != null && !compactLayout) {
@@ -731,38 +707,49 @@ fun SpeedometerScreen(
             }
 
             if (!isInPipMode) {
-                // --- BOTTOM LEFT: Stats Area ---
+                // --- BOTTOM: Stats and actions ---
                 if (showStats) {
                     Column(
-                        modifier = Modifier.align(Alignment.BottomStart)
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
                     ) {
-                        StatRow(
+                        BottomHudRow(
                             label = "top speed",
                             value = "%.1f %s".format(Locale.US, maxSpeed, speedUnit.label),
-                            labelColor,
-                            primaryColor
+                            labelColor = labelColor,
+                            valueColor = primaryColor,
+                            actionText = "reset",
+                            onAction = onReset
                         )
-                        StatRow(
+                        BottomHudRow(
                             label = "top satellites",
                             value = "${state.maxSatelliteCount}",
-                            labelColor,
-                            primaryColor
+                            labelColor = labelColor,
+                            valueColor = primaryColor,
+                            actionText = if (supportsPip) "float" else null,
+                            onAction = onEnterPip
                         )
                     }
                 }
 
                 if (compactActions) {
-                    Row(modifier = Modifier.align(Alignment.BottomEnd)) {
-                        StatAction(text = "reset", color = primaryColor, onClick = onReset)
-                        if (supportsPip) {
-                            StatAction(text = "float", color = primaryColor, onClick = onEnterPip)
-                        }
-                    }
-                } else {
-                    Column(
-                        modifier = Modifier.align(Alignment.BottomEnd),
-                        horizontalAlignment = Alignment.End
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .height(48.dp),
+                        contentAlignment = Alignment.CenterStart
                     ) {
+                        AccuracyIndicator(
+                            quality = displayedQuality,
+                            speed = currentSpeed,
+                            accuracy = currentAccuracy,
+                            unit = speedUnit.label,
+                            isInPipMode = false,
+                            unavailableText = unavailableText
+                        )
+                    }
+                    Row(modifier = Modifier.align(Alignment.BottomEnd)) {
                         StatAction(text = "reset", color = primaryColor, onClick = onReset)
                         if (supportsPip) {
                             StatAction(text = "float", color = primaryColor, onClick = onEnterPip)
@@ -929,7 +916,17 @@ private fun AccuracyIndicator(
 }
 
 @Composable
-private fun StatAction(text: String, color: Color, onClick: () -> Unit) {
+private fun StatAction(
+    text: String,
+    color: Color,
+    onClick: () -> Unit,
+    matchStatRowHeight: Boolean = false
+) {
+    val targetSize = if (matchStatRowHeight) {
+        Modifier.sizeIn(minWidth = 48.dp)
+    } else {
+        Modifier.minimumInteractiveComponentSize()
+    }
     Text(
         text = text,
         color = color,
@@ -938,9 +935,35 @@ private fun StatAction(text: String, color: Color, onClick: () -> Unit) {
         fontSize = 14.sp,
         modifier = Modifier
             .clickable(role = Role.Button, onClick = onClick)
-            .minimumInteractiveComponentSize()
+            .then(targetSize)
             .padding(horizontal = 8.dp, vertical = 2.dp)
     )
+}
+
+@Composable
+private fun BottomHudRow(
+    label: String,
+    value: String,
+    labelColor: Color,
+    valueColor: Color,
+    actionText: String?,
+    onAction: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        StatRow(label, value, labelColor, valueColor)
+        if (actionText != null) {
+            StatAction(
+                text = actionText,
+                color = valueColor,
+                onClick = onAction,
+                matchStatRowHeight = true
+            )
+        }
+    }
 }
 
 @Composable
