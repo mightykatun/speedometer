@@ -3,8 +3,11 @@ package com.mightykatun.speedometer.app
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -18,8 +21,10 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
@@ -32,15 +37,18 @@ import kotlin.math.min
 @Composable
 internal fun PositionTrailMap(
     trail: List<PositionFix>,
+    segmentStarts: List<Long> = emptyList(),
     current: PositionFix,
     isStationary: Boolean,
     primaryColor: Color,
     secondaryColor: Color,
+    onDoubleTap: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val heading = current.headingDegrees
     val headingText = heading?.let(::headingLabel)
     val altitudeText = current.altitudeMeters?.let(::altitudeLabel)
+    val currentOnDoubleTap by rememberUpdatedState(onDoubleTap)
     Box(
         modifier = modifier
             .semantics(mergeDescendants = true) {
@@ -51,6 +59,13 @@ internal fun PositionTrailMap(
                     else -> "Heading unavailable"
                 }
                 stateDescription = "Altitude ${altitudeText ?: "unavailable"}, $movementDescription"
+                onClick(label = "Save GPX trace") {
+                    currentOnDoubleTap()
+                    true
+                }
+            }
+            .pointerInput(Unit) {
+                detectTapGestures(onDoubleTap = { currentOnDoubleTap() })
             }
             .graphicsLayer {
                 compositingStrategy = CompositingStrategy.Offscreen
@@ -59,12 +74,15 @@ internal fun PositionTrailMap(
                 val projection = projectPositionTrail(
                     trail = trail,
                     current = current,
+                    segmentStarts = segmentStarts,
                     width = size.width,
                     height = size.height,
                     padding = 20.dp.toPx()
                 )
-                val tracePath = projection?.trace?.takeIf { it.size > 1 }?.let { points ->
-                    roundedTracePath(points, 7.dp.toPx())
+                val tracePaths = projection?.traceSegments.orEmpty().mapNotNull { points ->
+                    points.takeIf { it.size > 1 }?.let {
+                        roundedTracePath(it, 7.dp.toPx())
+                    }
                 }
                 val horizontalFade = Brush.horizontalGradient(
                     0f to Color.Transparent,
@@ -100,12 +118,14 @@ internal fun PositionTrailMap(
                 }
 
                 onDrawBehind {
-                    if (tracePath != null) {
-                        drawPath(
-                            path = tracePath,
-                            color = secondaryColor.copy(alpha = 0.72f),
-                            style = trailStroke
-                        )
+                    if (tracePaths.isNotEmpty()) {
+                        tracePaths.forEach { tracePath ->
+                            drawPath(
+                                path = tracePath,
+                                color = secondaryColor.copy(alpha = 0.72f),
+                                style = trailStroke
+                            )
+                        }
                         drawRect(brush = horizontalFade, blendMode = BlendMode.DstIn)
                         drawRect(brush = verticalFade, blendMode = BlendMode.DstIn)
                     }
@@ -113,7 +133,7 @@ internal fun PositionTrailMap(
                     if (isStationary || heading == null || arrowPath == null) {
                         drawCircle(
                             color = primaryColor,
-                            radius = 4.25.dp.toPx(),
+                            radius = 4.dp.toPx(),
                             center = currentPosition,
                             style = arrowStroke
                         )

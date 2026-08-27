@@ -15,13 +15,13 @@
 
 - `MainActivity.kt` is the real application/UI entrypoint and contains the single-screen Compose UI, permission recovery, Picture-in-Picture, preferences, and lifecycle wiring.
 - `SpeedometerViewModel` owns presentation/session state. `SpeedRepositoryViewModel` separately owns `SpeedRepositoryImpl` so acquisition survives configuration recreation and the worker closes only when that owner is cleared.
-- Real backgrounding (`onStop` when not changing configuration) must stop GNSS/sensor listeners and reset current speed, trend, and session maxima. Only speed unit, requested tracking mode, and global UI refresh rate persist as behavioral preferences; a separate non-sensitive permission-requested marker may persist solely for recovery UX.
+- Real backgrounding (`onStop` when not changing configuration) must stop GNSS/sensor listeners and clear live speed, satellites, position, and trend. In-process session maxima and the sampled trail survive as separate acquisition segments until explicit reset or process death. Only speed unit, requested tracking mode, and global UI refresh rate persist as behavioral preferences; a separate non-sensitive permission-requested marker may persist solely for recovery UX.
 - `SpeedRepositoryImpl` serializes lifecycle commands, GNSS, location, motion, and estimator calls on one `HandlerThread`. Main-thread deliveries are generation-guarded so callbacks queued before stop/restart cannot leak into a new session; preserve this ordering model.
 - Android boundaries are the injectable worker/dispatcher/location/motion interfaces in `RepositoryPlatform.kt`. Repository lifecycle and ordering behavior is intentionally covered by local JVM tests using fakes, not only device tests.
 - `domain/` is pure Kotlin. Measurement and estimator timestamps use elapsed-realtime nanoseconds; do not substitute wall-clock time or callback arrival time. Read `WIKI.md` before changing estimator or measurement semantics.
 - GNSS is the absolute speed source in both modes. `HANDHELD` ignores IMU; `FIXED` requires both linear-acceleration and rotation-vector sensors and must fall back to handheld if registration fails.
 - IMU may only bridge bounded short dropouts; it must not raise session maximum speed. Maximum candidates come from accepted raw GNSS, and stale/unreliable speed becomes unavailable rather than a synthetic zero or display floor.
-- Preserve the privacy boundary: the manifest has location permissions but no internet permission, and the app has no analytics or network dependency.
+- Preserve the privacy boundary: the manifest has location permissions but no internet permission, and the app has no analytics or network dependency. Location leaves memory only through an explicit user-triggered GPX export to Downloads on Android 10+.
 
 ## Tests
 

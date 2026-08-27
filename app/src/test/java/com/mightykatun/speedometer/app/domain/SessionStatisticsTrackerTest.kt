@@ -214,6 +214,24 @@ class SessionStatisticsTrackerTest {
         assertEquals(7, maxSatellites)
     }
 
+    @Test
+    fun `stopping acquisition preserves eligible maxima across estimator epochs`() {
+        tracker.startSession()
+        tracker.updateSatelliteCount(7)
+        tracker.updateSpeed(update(20.0, seconds(1), upsert(1, 20.0, seconds(4))))
+
+        val stopped = tracker.stopAcquisition()
+        val resumed = tracker.updateSpeed(
+            update(10.0, seconds(20), upsert(2, 10.0, seconds(23)))
+        )
+
+        assertNull(stopped.currentSpeedKmh)
+        assertEquals(72f, stopped.maxSpeedKmh, 0.01f)
+        assertEquals(0, stopped.currentSatellites)
+        assertEquals(7, stopped.maxSatellites)
+        assertEquals(72f, resumed.maxSpeedKmh, 0.01f)
+    }
+
     private fun update(
         speed: Double?,
         warmupStart: Long,

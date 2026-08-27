@@ -145,6 +145,97 @@ class SpeedometerViewModelTest {
     }
 
     @Test
+    fun `stopping acquisition preserves session aggregates and starts a new trail segment`() {
+        whenever(clock.elapsedRealtimeMillis()).thenReturn(0L)
+        viewModel.onSessionStart()
+        viewModel.onSatelliteCountReceived(7)
+        viewModel.onSpeedEstimateReceived(
+            estimate(
+                speed = 20.0,
+                quality = EstimateQuality.TRACKING,
+                timestampNanos = 4_000_000_000L,
+                warmupStartTimestampNanos = 1_000_000_000L,
+                candidateChanges = listOf(
+                    MaximumCandidateChange.Upsert(
+                        MaximumCandidate(1L, 20.0, 4_000_000_000L, 7)
+                    )
+                )
+            )
+        )
+        val first = position(10_000, latitude = 51.0)
+        val second = position(11_000, latitude = 51.0001)
+        viewModel.onPositionFixReceived(first)
+        viewModel.onPositionFixReceived(second)
+
+        viewModel.onAcquisitionStopped()
+
+        assertNull(viewModel.state.currentSpeedKmh)
+        assertNull(viewModel.state.speedAccuracyKmh)
+        assertEquals(EstimateQuality.ACQUIRING, viewModel.state.estimateQuality)
+        assertEquals(72f, viewModel.state.maxSpeedKmh, 0.001f)
+        assertEquals(0, viewModel.state.satelliteCount)
+        assertEquals(7, viewModel.state.maxSatelliteCount)
+        assertTrue(viewModel.state.speedTrend.isEmpty())
+        assertNull(viewModel.state.currentPosition)
+        assertEquals(listOf(first, second), viewModel.state.positionTrail)
+
+        viewModel.onSessionStart()
+        val resumedFirst = position(20_000, latitude = 52.0)
+        val resumedSecond = position(21_000, latitude = 52.0001)
+        viewModel.onPositionFixReceived(resumedFirst)
+        viewModel.onPositionFixReceived(resumedSecond)
+
+        assertEquals(
+            listOf(first, second, resumedFirst, resumedSecond),
+            viewModel.state.positionTrail
+        )
+        assertEquals(
+            listOf(resumedFirst.timestampNanos),
+            viewModel.state.positionTrailSegmentStarts
+        )
+    }
+
+    @Test
+    fun `stopping acquisition retains the latest accepted trail endpoint`() {
+        viewModel.onSessionStart()
+        val first = position(1_000, latitude = 51.0)
+        val nearby = position(2_000, latitude = 51.000005)
+        viewModel.onPositionFixReceived(first)
+        viewModel.onPositionFixReceived(nearby)
+        assertEquals(listOf(first), viewModel.state.positionTrail)
+
+        viewModel.onAcquisitionStopped()
+
+        assertEquals(listOf(first, nearby), viewModel.state.positionTrail)
+    }
+
+    @Test
+    fun `resumed trail rejects cached fixes from the previous acquisition`() {
+        viewModel.onSessionStart()
+        val first = position(10_000, latitude = 51.0)
+        val previousEndpoint = position(11_000, latitude = 51.0001)
+        viewModel.onPositionFixReceived(first)
+        viewModel.onPositionFixReceived(previousEndpoint)
+        viewModel.onAcquisitionStopped()
+
+        viewModel.onPositionFixReceived(position(9_000, latitude = 40.0))
+        viewModel.onPositionFixReceived(position(11_000, latitude = 40.0))
+        val resumedFirst = position(20_000, latitude = 52.0)
+        val resumedSecond = position(21_000, latitude = 52.0001)
+        viewModel.onPositionFixReceived(resumedFirst)
+        viewModel.onPositionFixReceived(resumedSecond)
+
+        assertEquals(
+            listOf(first, previousEndpoint, resumedFirst, resumedSecond),
+            viewModel.state.positionTrail
+        )
+        assertEquals(
+            listOf(resumedFirst.timestampNanos),
+            viewModel.state.positionTrailSegmentStarts
+        )
+    }
+
+    @Test
     fun `position trail follows refresh rate and clears with the session`() {
         viewModel.onSessionStart()
         val first = position(1_000, latitude = 51.0)
@@ -170,6 +261,7 @@ class SpeedometerViewModelTest {
 
         assertNull(viewModel.state.currentPosition)
         assertTrue(viewModel.state.positionTrail.isEmpty())
+        assertTrue(viewModel.state.positionTrailSegmentStarts.isEmpty())
     }
 
     @Test
@@ -187,6 +279,19 @@ class SpeedometerViewModelTest {
 
         assertEquals(nearby, viewModel.state.currentPosition)
         assertEquals(listOf(first), viewModel.state.positionTrail)
+    }
+
+    @Test
+    fun `position trail export snapshot includes the freshest accepted fix`() {
+        viewModel.onSessionStart()
+        val first = position(1_000, latitude = 51.0)
+        val nearby = position(2_000, latitude = 51.000005)
+        viewModel.onPositionFixReceived(first)
+        viewModel.onPositionFixReceived(nearby)
+
+        val snapshot = viewModel.positionTrailSnapshot()
+
+        assertEquals(listOf(first, nearby), snapshot.points)
     }
 
     @Test

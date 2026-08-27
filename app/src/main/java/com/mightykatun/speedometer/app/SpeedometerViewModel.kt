@@ -29,8 +29,10 @@ class SpeedometerViewModel(
     private var latestMaxSatelliteCount = 0
     private var lastPresentationTimestampNanos = 0L
     private val positionTrail = ArrayList<PositionFix>()
+    private val positionTrailSegmentStarts = ArrayList<Long>()
     private var latestPositionFix: PositionFix? = null
     private var pendingInitialPositionFix: PositionFix? = null
+    private var newPositionSegmentPending = false
     private var lastPositionPresentationTimestampNanos = 0L
 
     var state by mutableStateOf(SpeedometerState())
@@ -77,6 +79,9 @@ class SpeedometerViewModel(
 
     fun onPositionFixReceived(fix: PositionFix) {
         if (!sessionActive || !fix.isUsableForTrail()) return
+        if (newPositionSegmentPending &&
+            fix.timestampNanos <= (positionTrail.lastOrNull()?.timestampNanos ?: Long.MIN_VALUE)
+        ) return
         val previous = latestPositionFix
         if (previous == null) {
             val pending = pendingInitialPositionFix
@@ -109,10 +114,57 @@ class SpeedometerViewModel(
         publishPositionIfDue(force = true)
     }
 
+    internal fun positionTrailSnapshot(): PositionTrailSnapshot {
+        val points = positionTrail.toMutableList()
+        latestPositionFix?.let { latest ->
+            if (points.lastOrNull()?.timestampNanos == latest.timestampNanos) {
+                points[points.lastIndex] = latest
+            } else {
+                points += latest
+            }
+        }
+        return PositionTrailSnapshot(
+            points = points,
+            segmentStarts = positionTrailSegmentStarts.toList()
+        )
+    }
+
     fun onSessionStart() {
         if (sessionActive) return
         sessionActive = true
         sessionTracker.startSession()
+    }
+
+    fun onAcquisitionStopped() {
+        if (!sessionActive) return
+        retainLatestPositionEndpoint()
+        val stats = sessionTracker.stopAcquisition()
+        latestMaxSpeedKmh = stats.maxSpeedKmh
+        latestSatelliteCount = 0
+        latestMaxSatelliteCount = stats.maxSatellites
+        state = state.copy(
+            currentSpeedKmh = null,
+            speedAccuracyKmh = null,
+            estimateQuality = EstimateQuality.ACQUIRING,
+            maxSpeedKmh = latestMaxSpeedKmh,
+            satelliteCount = 0,
+            maxSatelliteCount = latestMaxSatelliteCount,
+            speedTrend = emptyList(),
+            currentPosition = null,
+            positionTrail = positionTrail.toList(),
+            positionTrailSegmentStarts = positionTrailSegmentStarts.toList()
+        )
+        errorMessage = null
+        warningMessage = null
+        signalMessage = null
+        gpsErrorActive = false
+        waitingForFreshGnss = false
+        latestPresentation = null
+        lastPresentationTimestampNanos = 0L
+        newPositionSegmentPending = positionTrail.isNotEmpty()
+        latestPositionFix = null
+        pendingInitialPositionFix = null
+        lastPositionPresentationTimestampNanos = 0L
     }
 
     fun onSessionReset() {
@@ -130,8 +182,10 @@ class SpeedometerViewModel(
         latestMaxSatelliteCount = 0
         lastPresentationTimestampNanos = 0L
         positionTrail.clear()
+        positionTrailSegmentStarts.clear()
         latestPositionFix = null
         pendingInitialPositionFix = null
+        newPositionSegmentPending = false
         lastPositionPresentationTimestampNanos = 0L
     }
 
@@ -226,7 +280,8 @@ class SpeedometerViewModel(
 
         state = state.copy(
             currentPosition = latest,
-            positionTrail = positionTrail.toList()
+            positionTrail = positionTrail.toList(),
+            positionTrailSegmentStarts = positionTrailSegmentStarts.toList()
         )
         lastPositionPresentationTimestampNanos = maxOf(
             lastPositionPresentationTimestampNanos,
@@ -247,9 +302,29 @@ class SpeedometerViewModel(
         positionTrail.addAll(compacted)
     }
 
+    private fun retainLatestPositionEndpoint() {
+        val latest = latestPositionFix ?: return
+        when {
+            positionTrail.isEmpty() -> positionTrail += latest
+            positionTrail.last().timestampNanos == latest.timestampNanos -> {
+                positionTrail[positionTrail.lastIndex] = latest
+            }
+            latest.timestampNanos > positionTrail.last().timestampNanos -> {
+                positionTrail += latest
+                compactPositionTrailIfNeeded()
+            }
+        }
+    }
+
     private fun recordPositionFix(fix: PositionFix) {
         latestPositionFix = fix
         when {
+            newPositionSegmentPending -> {
+                newPositionSegmentPending = false
+                positionTrailSegmentStarts += fix.timestampNanos
+                positionTrail += fix
+                compactPositionTrailIfNeeded()
+            }
             positionTrail.isEmpty() -> positionTrail += fix
             positionTrail.last().timestampNanos == fix.timestampNanos -> {
                 positionTrail[positionTrail.lastIndex] = fix

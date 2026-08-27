@@ -18,13 +18,13 @@ The app remains a single-screen HUD with no navigation graph.
 
 - Shows `speedometer vX.Y.Z` as a compact gray label using the packaged app version
 - Shows recent satellites reported as used-in-fix by Android's GNSS status callback; stale evidence returns to zero
-- GNSS status is green at three or more satellites and red below three
+- Colors the count red at zero, orange from one through five, and green at six or more; there is no separate satellite status dot
 - Satellite count is status information, not a speed-accuracy measurement
 
 ### Top Right
 
 - Persisted text-only `gnss` / `gnss+imu` selector matching the HUD labels
-- Defaults to `gnss`
+- Defaults to `gnss+imu` and falls back to `gnss` when either required motion sensor is unavailable
 - Disabled when the device lacks either linear acceleration or rotation-vector sensors
 - A persisted global refresh selector below the mode control cycles through 0.5, 1, and 2 seconds
 - Hidden in Picture-in-Picture mode
@@ -36,7 +36,7 @@ The app remains a single-screen HUD with no navigation graph.
 - Low speeds remain visible; there is no 1.5 km/h display floor
 - `--` means speed is not currently defensible and pulses while acquiring the initial measurement
 - A small colored dot in Picture-in-Picture and compact `± value unit` line report one-standard-deviation uncertainty
-- The uncertainty indicator is green at or below 10 percent of current speed, amber through 20 percent, and red above 20 percent or when the percentage is undefined
+- The uncertainty indicator compares relative uncertainty `p = 100 * uncertainty / speed` with speed-dependent limits using `x` in m/s: green through `20/(1+x^2) + 10 - 5*atan(x/10)`, amber through `20/(1+x^2) + 20 - 10*atan(x/5)`, and red above that or when the percentage is undefined
 - The uncertainty line is hidden while acquiring the first required GNSS fix or IMU sample
 
 Estimate states:
@@ -60,7 +60,7 @@ Estimate states:
 
 ### GNSS
 
-`gnss` is the safe default. It confidence-weights GNSS speed and ignores all IMU input because hand movement cannot be separated reliably from vehicle acceleration.
+`gnss` is the handheld-safe mode. It confidence-weights GNSS speed and ignores all IMU input because hand movement cannot be separated reliably from vehicle acceleration.
 
 ### GNSS + IMU
 
@@ -175,13 +175,14 @@ No watchdog injects fake zero readings.
 
 - Acquisition starts in `onStart` after precise-location permission is available
 - Acquisition and sensor listeners survive configuration recreation but stop when the app backgrounds
-- Session statistics and the in-memory position trail reset when the app backgrounds
+- Backgrounding clears live readings and the trend but preserves in-memory session maxima and trail segments until explicit reset or process death
 - The trail starts only after two accurate, physically plausible fixes, samples movement at 3 m spacing, progressively compacts at 2,048 points, and always retains its first and latest anchors
-- Trail projection is north-up and continuously zooms to fit the complete session path; it is hidden when the viewport cannot keep it clear of the speed display
+- Trail projection is north-up, does not connect separate foreground acquisition spans, and continuously zooms to fit the complete session path; it is hidden when the viewport cannot keep it clear of the speed display
+- On Android 10+, double-tapping the visible trail exports its sampled acquisition spans as GPX track segments directly to Downloads and confirms the saved filename with a standard Toast
 - Double-tapping the numeric speed toggles a presentation-only focused display without resetting acquisition or session state; landscape always uses the enlarged focused layout
 - Display unit, requested tracking mode, and global refresh interval persist locally
 - A non-sensitive permission-requested marker persists only to distinguish first request from settings-only denial; permission grants and in-flight state do not persist as behavioral preferences
-- No location, motion, or session history leaves the device
+- No location, motion, or session history leaves app memory unless the user explicitly exports a GPX file; the app still has no network or broad storage permission
 
 ## Errors and Fallbacks
 
@@ -248,7 +249,7 @@ Automated gates:
 ./gradlew --no-build-cache clean test lint assembleDebug assembleRelease assembleDebugAndroidTest
 ```
 
-JVM tests cover repository lifecycle/retry/generation ordering, low-speed preservation, invalid measurements, uncertainty percentage bands, outliers, reacquisition probation, replay-aware maximum candidates, GNSS isolation, GNSS + IMU prediction, trend retention, position-trail gating/compaction/projection, spike/vertical-shock rejection, violent-motion quarantine, orientation freshness, sensor-rate invariance, course expiry, delayed replay, duplicate inputs, history compaction, stationary evidence, safe mode transitions, and stale-data unavailability. Compose instrumentation tests cover mode, unit, reset, float, permission-recovery actions, focused portrait/landscape layouts, and position-trail accessibility/layout.
+JVM tests cover repository lifecycle/retry/generation ordering, low-speed preservation, invalid measurements, uncertainty percentage bands, satellite status boundaries, outliers, reacquisition probation, replay-aware maximum candidates, GNSS isolation, GNSS + IMU prediction, trend retention, position-trail gating/compaction/projection, segmented GPX encoding, spike/vertical-shock rejection, violent-motion quarantine, orientation freshness, sensor-rate invariance, course expiry, delayed replay, duplicate inputs, history compaction, stationary evidence, safe mode transitions, and stale-data unavailability. Compose instrumentation tests cover mode, unit, reset, float, permission-recovery actions, focused portrait/landscape layouts, and position-trail accessibility/layout/export gestures.
 
 ## Field Validation
 

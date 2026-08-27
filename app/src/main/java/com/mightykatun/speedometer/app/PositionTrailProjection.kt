@@ -10,12 +10,14 @@ import kotlin.math.roundToInt
 
 internal data class ProjectedPositionTrail(
     val trace: List<Offset>,
+    val traceSegments: List<List<Offset>>,
     val current: Offset
 )
 
 internal fun projectPositionTrail(
     trail: List<PositionFix>,
     current: PositionFix,
+    segmentStarts: List<Long> = emptyList(),
     width: Float,
     height: Float,
     padding: Float,
@@ -90,8 +92,35 @@ internal fun projectPositionTrail(
         )
     }
 
+    val sortedSegmentStarts = segmentStarts.sorted()
+    val traceSegments = ArrayList<List<Offset>>()
+    var segment = ArrayList<Offset>()
+    var nextSegmentStart = 0
+    for (index in projected.indices) {
+        val timestampNanos = fixAt(index).timestampNanos
+        val previousTimestampNanos = if (index == 0) Long.MIN_VALUE else {
+            fixAt(index - 1).timestampNanos
+        }
+        var startsNewSegment = false
+        while (nextSegmentStart < sortedSegmentStarts.size &&
+            sortedSegmentStarts[nextSegmentStart] <= timestampNanos
+        ) {
+            if (index > 0 && sortedSegmentStarts[nextSegmentStart] > previousTimestampNanos) {
+                startsNewSegment = true
+            }
+            nextSegmentStart++
+        }
+        if (startsNewSegment && segment.isNotEmpty()) {
+            traceSegments += segment
+            segment = ArrayList()
+        }
+        segment += projected[index]
+    }
+    if (segment.isNotEmpty()) traceSegments += segment
+
     return ProjectedPositionTrail(
         trace = projected,
+        traceSegments = traceSegments,
         current = projected.last()
     )
 }

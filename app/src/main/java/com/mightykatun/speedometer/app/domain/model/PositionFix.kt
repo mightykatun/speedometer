@@ -6,5 +6,6 @@ data class PositionFix(
     val headingDegrees: Float?,
     val horizontalAccuracyMeters: Float,
     val timestampNanos: Long,
-    val altitudeMeters: Double? = null
+    val altitudeMeters: Double? = null,
+    val utcTimeMillis: Long? = null
 )

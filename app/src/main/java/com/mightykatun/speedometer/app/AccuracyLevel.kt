@@ -1,19 +1,36 @@
 package com.mightykatun.speedometer.app
 
+import kotlin.math.atan
+
 internal enum class AccuracyLevel {
     GOOD,
     FAIR,
     POOR
 }
 
-internal fun accuracyLevel(currentSpeed: Float?, accuracy: Float?): AccuracyLevel {
-    if (currentSpeed == null || accuracy == null || currentSpeed <= 0f || accuracy < 0f) {
+internal fun accuracyLevel(
+    currentSpeedMetersPerSecond: Float?,
+    uncertaintyMetersPerSecond: Float?
+): AccuracyLevel {
+    if (currentSpeedMetersPerSecond == null || uncertaintyMetersPerSecond == null ||
+        !currentSpeedMetersPerSecond.isFinite() || !uncertaintyMetersPerSecond.isFinite() ||
+        currentSpeedMetersPerSecond <= 0f || uncertaintyMetersPerSecond < 0f
+    ) {
         return AccuracyLevel.POOR
     }
-    val percentage = accuracy / currentSpeed * 100f
+    val speed = currentSpeedMetersPerSecond.toDouble()
+    val percentage = uncertaintyMetersPerSecond / currentSpeedMetersPerSecond * 100f
     return when {
-        percentage <= 10f -> AccuracyLevel.GOOD
-        percentage <= 20f -> AccuracyLevel.FAIR
+        percentage <= greenUncertaintyThreshold(speed) -> AccuracyLevel.GOOD
+        percentage <= orangeUncertaintyThreshold(speed) -> AccuracyLevel.FAIR
         else -> AccuracyLevel.POOR
     }
 }
+
+internal fun greenUncertaintyThreshold(speedMetersPerSecond: Double): Double =
+    20.0 / (1.0 + speedMetersPerSecond * speedMetersPerSecond) +
+        10.0 - 5.0 * atan(speedMetersPerSecond / 10.0)
+
+internal fun orangeUncertaintyThreshold(speedMetersPerSecond: Double): Double =
+    20.0 / (1.0 + speedMetersPerSecond * speedMetersPerSecond) +
+        20.0 - 10.0 * atan(speedMetersPerSecond / 5.0)

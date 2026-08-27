@@ -71,6 +71,32 @@ class PositionTrailProjectionTest {
     }
 
     @Test
+    fun `projection does not connect acquisition segments`() {
+        val trail = listOf(
+            fix(51.0, 4.0, timestampNanos = 1L),
+            fix(51.001, 4.0, timestampNanos = 2L),
+            fix(52.0, 5.0, timestampNanos = 3L),
+            fix(52.001, 5.0, timestampNanos = 4L)
+        )
+
+        val projection = requireNotNull(
+            projectPositionTrail(
+                trail = trail,
+                current = trail.last(),
+                segmentStarts = listOf(3L),
+                width = 300f,
+                height = 200f,
+                padding = 20f
+            )
+        )
+
+        assertEquals(2, projection.traceSegments.size)
+        assertEquals(2, projection.traceSegments[0].size)
+        assertEquals(2, projection.traceSegments[1].size)
+        assertEquals(projection.trace, projection.traceSegments.flatten())
+    }
+
+    @Test
     fun `invalid geometry is rejected`() {
         val invalid = fix(Double.NaN, 4.0, timestampNanos = 1L)
 

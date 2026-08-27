@@ -52,6 +52,19 @@ class SessionStatisticsTracker(
         maxSatellites = max(maxSatellites, satelliteCount)
         return maxSatellites
     }
+
+    fun stopAcquisition(): SessionStatistics {
+        val activeMaximum = if (eligibleSpeedCounts.isEmpty()) 0.0 else eligibleSpeedCounts.lastKey()
+        committedMaxSpeedMetersPerSecond = max(
+            committedMaxSpeedMetersPerSecond,
+            activeMaximum
+        )
+        maximumWarmupStartTimestampNanos = 0L
+        activeCandidates.clear()
+        eligibleSpeedCounts.clear()
+        currentSatellites = 0
+        return snapshot(currentSpeedKmh = null)
+    }
     
     fun reset() {
         sessionStartTimestampNanos = 0L

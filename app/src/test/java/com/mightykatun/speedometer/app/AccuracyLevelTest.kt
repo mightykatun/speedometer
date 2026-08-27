@@ -4,19 +4,47 @@ import com.mightykatun.speedometer.app.domain.model.SpeedTrendSample
 import com.mightykatun.speedometer.app.domain.model.SpeedUnit
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import kotlin.math.PI
 
 class AccuracyLevelTest {
     @Test
-    fun `accuracy color bands use percentage of current speed`() {
-        assertEquals(AccuracyLevel.GOOD, accuracyLevel(currentSpeed = 100f, accuracy = 10f))
-        assertEquals(AccuracyLevel.FAIR, accuracyLevel(currentSpeed = 100f, accuracy = 20f))
-        assertEquals(AccuracyLevel.POOR, accuracyLevel(currentSpeed = 100f, accuracy = 20.1f))
+    fun `low speeds receive more lenient relative uncertainty bands`() {
+        assertEquals(AccuracyLevel.GOOD, accuracyLevel(1f, 0.15f))
+        assertEquals(AccuracyLevel.POOR, accuracyLevel(10f, 1.5f))
+    }
+
+    @Test
+    fun `accuracy color bands include their dynamic boundaries`() {
+        val speed = 10f
+        val green = greenUncertaintyThreshold(speed.toDouble()).toFloat()
+        val orange = orangeUncertaintyThreshold(speed.toDouble()).toFloat()
+
+        assertEquals(AccuracyLevel.GOOD, accuracyLevel(speed, speed * (green - 0.001f) / 100f))
+        assertEquals(AccuracyLevel.FAIR, accuracyLevel(speed, speed * (green + 0.001f) / 100f))
+        assertEquals(AccuracyLevel.FAIR, accuracyLevel(speed, speed * (orange - 0.001f) / 100f))
+        assertEquals(AccuracyLevel.POOR, accuracyLevel(speed, speed * (orange + 0.001f) / 100f))
+    }
+
+    @Test
+    fun `uncertainty curves have the confirmed endpoints and asymptotes`() {
+        assertEquals(30.0, greenUncertaintyThreshold(0.0), 0.0)
+        assertEquals(40.0, orangeUncertaintyThreshold(0.0), 0.0)
+        assertEquals(
+            10.0 - 5.0 * PI / 2.0,
+            greenUncertaintyThreshold(Double.POSITIVE_INFINITY),
+            1e-12
+        )
+        assertEquals(
+            20.0 - 5.0 * PI,
+            orangeUncertaintyThreshold(Double.POSITIVE_INFINITY),
+            1e-12
+        )
     }
 
     @Test
     fun `accuracy without positive current speed is poor`() {
-        assertEquals(AccuracyLevel.POOR, accuracyLevel(currentSpeed = 0f, accuracy = 0.1f))
-        assertEquals(AccuracyLevel.POOR, accuracyLevel(currentSpeed = null, accuracy = 1f))
+        assertEquals(AccuracyLevel.POOR, accuracyLevel(0f, 0.1f))
+        assertEquals(AccuracyLevel.POOR, accuracyLevel(null, 1f))
     }
 
     @Test

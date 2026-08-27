@@ -360,7 +360,8 @@ class SpeedRepositoryImplTest {
                     horizontalAccuracy = 4.5f,
                     latitude = 51.5074,
                     longitude = -0.1278,
-                    altitude = 35.4
+                    altitude = 35.4,
+                    utcTimeMillis = 1_704_067_200_000L
                 )
             )
         )
@@ -371,6 +372,7 @@ class SpeedRepositoryImplTest {
         assertEquals(4.5f, fix.horizontalAccuracyMeters, 0f)
         assertEquals(35.4, fix.altitudeMeters!!, 0.0)
         assertEquals(10_000_000_000L, fix.timestampNanos)
+        assertEquals(1_704_067_200_000L, fix.utcTimeMillis)
     }
 
     @Test
@@ -396,6 +398,39 @@ class SpeedRepositoryImplTest {
     @Test
     fun `position fixes require reported horizontal accuracy`() {
         assertNull(createPositionFix(locationAt(timestampNanos = 12_000_000_000L)))
+    }
+
+    @Test
+    fun `restart does not deliver cached position fixes from before acquisition`() {
+        val fixture = Fixture()
+        val recording = Recording()
+        fixture.repository.start(TrackingMode.HANDHELD, recording)
+        fixture.worker.runAll()
+        fixture.location.emitLocation(
+            locationAt(
+                timestampNanos = 10_000_000_000L,
+                latitude = 51.0,
+                horizontalAccuracy = 5f
+            )
+        )
+        fixture.main.runAll()
+        assertEquals(1, recording.positionFixes.size)
+
+        fixture.repository.stopUpdates()
+        fixture.worker.runAll()
+        fixture.worker.nowNanos = 20_000_000_000L
+        fixture.repository.start(TrackingMode.HANDHELD, recording)
+        fixture.worker.runAll()
+        fixture.location.emitLocation(
+            locationAt(
+                timestampNanos = 15_000_000_000L,
+                latitude = 52.0,
+                horizontalAccuracy = 5f
+            )
+        )
+        fixture.main.runAll()
+
+        assertEquals(1, recording.positionFixes.size)
     }
 
     @Test
@@ -500,7 +535,8 @@ class SpeedRepositoryImplTest {
         horizontalAccuracy: Float? = null,
         latitude: Double = 0.0,
         longitude: Double = 0.0,
-        altitude: Double? = null
+        altitude: Double? = null,
+        utcTimeMillis: Long = 0L
     ): Location = mock<Location>().also { location ->
         whenever(location.elapsedRealtimeNanos).thenReturn(timestampNanos)
         whenever(location.latitude).thenReturn(latitude)
@@ -513,6 +549,7 @@ class SpeedRepositoryImplTest {
         whenever(location.bearing).thenReturn(bearing ?: 0f)
         whenever(location.hasAccuracy()).thenReturn(horizontalAccuracy != null)
         whenever(location.accuracy).thenReturn(horizontalAccuracy ?: 0f)
+        whenever(location.time).thenReturn(utcTimeMillis)
     }
 
     private class Fixture(supportsFixedMode: Boolean = true) {

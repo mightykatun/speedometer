@@ -179,6 +179,7 @@ class SpeedRepositoryImpl private constructor(
         private var gpsProviderDisabled = false
         private var providerRecoveryPending = false
         private var providerRecoveryBoundaryNanos = 0L
+        private var acquisitionStartTimestampNanos = 0L
         private var satelliteEvidence: SatelliteEvidence? = null
 
         private val estimateTick = object : Runnable {
@@ -197,7 +198,9 @@ class SpeedRepositoryImpl private constructor(
                 val measurement = createMeasurement(location)
                 val acceptedCorrectionTimestamp = estimator.ingestGnssMeasurement(measurement)
                 emitEstimate(estimator.snapshotAt(location.elapsedRealtimeNanos))
-                createPositionFix(location)?.let(::emitPositionFix)
+                if (location.elapsedRealtimeNanos > acquisitionStartTimestampNanos) {
+                    createPositionFix(location)?.let(::emitPositionFix)
+                }
                 if (providerRecoveryPending &&
                     acceptedCorrectionTimestamp != null &&
                     acceptedCorrectionTimestamp > providerRecoveryBoundaryNanos
@@ -262,6 +265,7 @@ class SpeedRepositoryImpl private constructor(
         }
 
         fun start(commandId: Long, requestedMode: TrackingMode): Boolean {
+            acquisitionStartTimestampNanos = worker.elapsedRealtimeNanos()
             effectiveMode = when (requestedMode) {
                 TrackingMode.FIXED -> {
                     if (!registerLocationCallbacks()) return false
@@ -293,6 +297,7 @@ class SpeedRepositoryImpl private constructor(
             gpsProviderDisabled = false
             providerRecoveryPending = false
             providerRecoveryBoundaryNanos = 0L
+            acquisitionStartTimestampNanos = 0L
             satelliteEvidence = null
         }
 
@@ -667,7 +672,8 @@ internal fun createPositionFix(location: Location): PositionFix? {
         headingDegrees = heading,
         horizontalAccuracyMeters = horizontalAccuracy,
         timestampNanos = timestampNanos,
-        altitudeMeters = altitude
+        altitudeMeters = altitude,
+        utcTimeMillis = location.time.takeIf { it > 0L }
     )
 }
 

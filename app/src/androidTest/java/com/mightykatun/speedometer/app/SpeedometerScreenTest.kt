@@ -2,8 +2,10 @@ package com.mightykatun.speedometer.app
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
@@ -17,6 +19,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Density
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
 import com.mightykatun.speedometer.app.domain.model.PositionFix
 import com.mightykatun.speedometer.app.domain.model.RefreshRate
@@ -196,6 +199,7 @@ class SpeedometerScreenTest {
 
     @Test
     fun positionTrailExposesNorthUpHeading() {
+        var exportCount = 0
         val first = PositionFix(51.0, 4.0, null, 5f, 1_000_000_000L)
         val current = PositionFix(
             51.001,
@@ -212,6 +216,7 @@ class SpeedometerScreenTest {
                 isStationary = false,
                 primaryColor = Color.White,
                 secondaryColor = Color.Gray,
+                onDoubleTap = { exportCount++ },
                 modifier = Modifier.size(300.dp, 180.dp)
             )
         }
@@ -224,8 +229,10 @@ class SpeedometerScreenTest {
                 )
             )
             .assertIsDisplayed()
+            .performTouchInput { doubleClick() }
         composeRule.onNodeWithText("123 m").assertIsDisplayed()
         composeRule.onNodeWithText("045\u00b0 NE").assertIsDisplayed()
+        composeRule.runOnIdle { assertEquals(1, exportCount) }
     }
 
     @Test
@@ -259,32 +266,37 @@ class SpeedometerScreenTest {
         val first = PositionFix(51.0, 4.0, 45f, 5f, 1_000_000_000L)
         val current = PositionFix(51.001, 4.001, 45f, 5f, 2_000_000_000L)
         composeRule.setContent {
-            Box(modifier = Modifier.size(320.dp, 800.dp)) {
-                SpeedometerScreen(
-                    state = SpeedometerState(
-                        currentPosition = current,
-                        positionTrail = listOf(first, current)
-                    ),
-                    error = null,
-                    warning = "Motion sensors unavailable; using GNSS only",
-                    signalMessage = null,
-                    isInPipMode = false,
-                    speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
-                    trackingMode = TrackingMode.HANDHELD,
-                    refreshRate = RefreshRate.ONE_SECOND,
-                    trackingModeEnabled = true,
-                    supportsPip = true,
-                    permissionMessage = null,
-                    permissionCanRequest = false,
-                    onSpeedUnitClick = {},
-                    onTrackingModeChange = {},
-                    onRefreshRateChange = {},
-                    onReset = {},
-                    onRetry = {},
-                    onEnterPip = {},
-                    onRequestPermission = {},
-                    onOpenSettings = {}
-                )
+            val density = LocalDensity.current
+            CompositionLocalProvider(
+                LocalDensity provides Density(density.density, fontScale = 1f)
+            ) {
+                Box(modifier = Modifier.size(320.dp, 800.dp)) {
+                    SpeedometerScreen(
+                        state = SpeedometerState(
+                            currentPosition = current,
+                            positionTrail = listOf(first, current)
+                        ),
+                        error = null,
+                        warning = "Motion sensors unavailable; using GNSS only",
+                        signalMessage = null,
+                        isInPipMode = false,
+                        speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
+                        trackingMode = TrackingMode.HANDHELD,
+                        refreshRate = RefreshRate.ONE_SECOND,
+                        trackingModeEnabled = true,
+                        supportsPip = true,
+                        permissionMessage = null,
+                        permissionCanRequest = false,
+                        onSpeedUnitClick = {},
+                        onTrackingModeChange = {},
+                        onRefreshRateChange = {},
+                        onReset = {},
+                        onRetry = {},
+                        onEnterPip = {},
+                        onRequestPermission = {},
+                        onOpenSettings = {}
+                    )
+                }
             }
         }
 

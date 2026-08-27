@@ -12,10 +12,12 @@ import android.os.Bundle
 import android.provider.Settings
 import android.util.Rational
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.lifecycle.lifecycleScope
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -69,7 +71,13 @@ import com.mightykatun.speedometer.app.domain.model.SpeedUnit
 import com.mightykatun.speedometer.app.domain.model.SpeedometerState
 import com.mightykatun.speedometer.app.domain.model.SpeedTrendSample
 import com.mightykatun.speedometer.app.domain.model.TrackingMode
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.max
 
 class MainActivity : ComponentActivity() {
@@ -87,6 +95,7 @@ class MainActivity : ComponentActivity() {
     private var latestModeCommandId = 0L
     private var permissionIssue by mutableStateOf<LocationPermissionIssue?>(null)
     private var permissionRequestInFlight = false
+    private var gpxExportInProgress = false
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -147,13 +156,14 @@ class MainActivity : ComponentActivity() {
                 onSpeedUnitClick = { cycleSpeedUnit() },
                 onTrackingModeChange = { cycleTrackingMode() },
                 onRefreshRateChange = { cycleRefreshRate() },
-                onReset = { restartMeasurements() },
-                onRetry = { restartMeasurements() },
+                onReset = { resetSessionAndRestart() },
+                onRetry = { retryMeasurements() },
                 onEnterPip = { enterPipMode() },
                 onRequestPermission = { requestLocationPermission() },
                 onOpenSettings = { openAppSettings() },
                 isSpeedFocusMode = isSpeedFocusMode,
-                onSpeedDoubleTap = { isSpeedFocusMode = !isSpeedFocusMode }
+                onSpeedDoubleTap = { isSpeedFocusMode = !isSpeedFocusMode },
+                onPositionTrailDoubleTap = ::exportPositionTrail
             )
         }
     }
@@ -235,7 +245,7 @@ class MainActivity : ComponentActivity() {
         if (!isChangingConfigurations) {
             isSpeedFocusMode = false
             speedRepository.stopUpdates()
-            viewModel.onSessionReset()
+            viewModel.onAcquisitionStopped()
         }
     }
 
@@ -279,11 +289,55 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun restartMeasurements() {
+    private fun resetSessionAndRestart() {
         speedRepository.stopUpdates()
         viewModel.onSessionReset()
         viewModel.onSessionStart()
         checkPermissionsAndStart()
+    }
+
+    private fun retryMeasurements() {
+        speedRepository.stopUpdates()
+        viewModel.onAcquisitionStopped()
+        checkPermissionsAndStart()
+    }
+
+    private fun exportPositionTrail() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            Toast.makeText(this, "GPX export requires Android 10", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (gpxExportInProgress) return
+        val snapshot = viewModel.positionTrailSnapshot()
+        if (snapshot.points.isEmpty()) {
+            Toast.makeText(this, "No trace to save", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val fileName = "speedometer-${
+            SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        }.gpx"
+        gpxExportInProgress = true
+        lifecycleScope.launch {
+            val savedName = try {
+                withContext(Dispatchers.IO) {
+                    GpxFileStore.saveToDownloads(
+                        context = applicationContext,
+                        fileName = fileName,
+                        contents = encodeGpx(snapshot)
+                    )
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                null
+            }
+            gpxExportInProgress = false
+            Toast.makeText(
+                applicationContext,
+                savedName?.let { "File $it saved" } ?: "Unable to save GPX",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
     }
 
     private fun requestLocationPermission() {
@@ -400,7 +454,8 @@ fun SpeedometerScreen(
     onRequestPermission: () -> Unit,
     onOpenSettings: () -> Unit,
     isSpeedFocusMode: Boolean = false,
-    onSpeedDoubleTap: () -> Unit = {}
+    onSpeedDoubleTap: () -> Unit = {},
+    onPositionTrailDoubleTap: () -> Unit = {}
 ) {
     val isDark = isSystemInDarkTheme()
     val backgroundColor = if (isDark) Color.Black else Color.White
@@ -421,9 +476,17 @@ fun SpeedometerScreen(
     } else {
         "speed unavailable"
     }
-    val statusColor = if (displayedSatelliteCount >= 3) Color.Green else Color.Red
+    val satelliteLevel = satelliteLevel(displayedSatelliteCount)
+    val satelliteColor = when (satelliteLevel) {
+        SatelliteLevel.NONE -> if (isDark) Color(0xFFFF6B6B) else Color(0xFFB3261E)
+        SatelliteLevel.LIMITED -> if (isDark) Color(0xFFFFC857) else Color(0xFF8A5A00)
+        SatelliteLevel.GOOD -> if (isDark) Color(0xFF69F0AE) else Color(0xFF087F23)
+    }
     val currentSpeed = displayedSpeedKmh?.let(speedUnit::fromKilometersPerHour)
     val currentAccuracy = state.speedAccuracyKmh?.let(speedUnit::fromKilometersPerHour)
+    val currentSpeedMetersPerSecond = displayedSpeedKmh?.div(KILOMETERS_PER_HOUR_PER_METER_PER_SECOND)
+    val currentAccuracyMetersPerSecond = state.speedAccuracyKmh
+        ?.div(KILOMETERS_PER_HOUR_PER_METER_PER_SECOND)
     val maxSpeed = speedUnit.fromKilometersPerHour(state.maxSpeedKmh)
     val currentOnSpeedDoubleTap by rememberUpdatedState(onSpeedDoubleTap)
 
@@ -555,16 +618,16 @@ fun SpeedometerScreen(
                                     .padding(vertical = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(10.dp)
-                                        .background(
-                                            if (compactWarning != null) Color(0xFFFFA000) else statusColor,
-                                            shape = androidx.compose.foundation.shape.CircleShape
-                                        )
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
                                 if (compactWarning != null) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(10.dp)
+                                            .background(
+                                                Color(0xFFFFA000),
+                                                shape = androidx.compose.foundation.shape.CircleShape
+                                            )
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
                                     Text(
                                         text = compactWarning,
                                         color = primaryColor,
@@ -587,11 +650,14 @@ fun SpeedometerScreen(
                                     )
                                     Text(
                                         text = "$displayedSatelliteCount",
-                                        color = primaryColor,
+                                        color = satelliteColor,
                                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 14.sp,
-                                        maxLines = 1
+                                        maxLines = 1,
+                                        modifier = Modifier.semantics {
+                                            stateDescription = satelliteLevel.accessibilityLabel
+                                        }
                                     )
                                 }
                             }
@@ -620,10 +686,12 @@ fun SpeedometerScreen(
                     if (showPositionTrail) {
                         PositionTrailMap(
                             trail = state.positionTrail,
+                            segmentStarts = state.positionTrailSegmentStarts,
                             current = requireNotNull(state.currentPosition),
                             isStationary = displayedSpeedKmh == 0f,
                             primaryColor = primaryColor,
                             secondaryColor = secondaryColor,
+                            onDoubleTap = onPositionTrailDoubleTap,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 8.dp)
@@ -756,8 +824,9 @@ fun SpeedometerScreen(
                 if (!compactActions || focusedDisplay) {
                     AccuracyIndicator(
                         quality = displayedQuality,
-                        speed = currentSpeed,
-                        accuracy = currentAccuracy,
+                        speedMetersPerSecond = currentSpeedMetersPerSecond,
+                        uncertaintyMetersPerSecond = currentAccuracyMetersPerSecond,
+                        displayedAccuracy = currentAccuracy,
                         unit = speedUnit.label,
                         isInPipMode = isInPipMode,
                         unavailableText = unavailableText
@@ -801,8 +870,9 @@ fun SpeedometerScreen(
                     ) {
                         AccuracyIndicator(
                             quality = displayedQuality,
-                            speed = currentSpeed,
-                            accuracy = currentAccuracy,
+                            speedMetersPerSecond = currentSpeedMetersPerSecond,
+                            uncertaintyMetersPerSecond = currentAccuracyMetersPerSecond,
+                            displayedAccuracy = currentAccuracy,
                             unit = speedUnit.label,
                             isInPipMode = false,
                             unavailableText = unavailableText
@@ -911,8 +981,9 @@ private fun PermissionRecovery(
 @Composable
 private fun AccuracyIndicator(
     quality: EstimateQuality,
-    speed: Float?,
-    accuracy: Float?,
+    speedMetersPerSecond: Float?,
+    uncertaintyMetersPerSecond: Float?,
+    displayedAccuracy: Float?,
     unit: String,
     isInPipMode: Boolean,
     unavailableText: String = "no signal"
@@ -923,7 +994,7 @@ private fun AccuracyIndicator(
     val level = if (quality == EstimateQuality.UNAVAILABLE) {
         AccuracyLevel.POOR
     } else {
-        accuracyLevel(speed, accuracy)
+        accuracyLevel(speedMetersPerSecond, uncertaintyMetersPerSecond)
     }
     val color = when {
         quality == EstimateQuality.UNAVAILABLE ->
@@ -936,7 +1007,7 @@ private fun AccuracyIndicator(
     }
     val text = when (quality) {
         EstimateQuality.TRACKING, EstimateQuality.DEGRADED ->
-            accuracy?.let { "± %.1f %s".format(Locale.US, it, unit) } ?: "estimating"
+            displayedAccuracy?.let { "± %.1f %s".format(Locale.US, it, unit) } ?: "estimating"
         EstimateQuality.ACQUIRING -> ""
         EstimateQuality.UNAVAILABLE -> unavailableText
     }
@@ -1217,6 +1288,7 @@ internal fun speedTrendDescription(
 
 private const val TREND_WINDOW_NANOS = 30_000_000_000L
 private const val TREND_DIRECTION_THRESHOLD_KMH = 0.5f
+private const val KILOMETERS_PER_HOUR_PER_METER_PER_SECOND = 3.6f
 
 @Composable
 fun StatRow(label: String, value: String, labelColor: Color, valueColor: Color) {

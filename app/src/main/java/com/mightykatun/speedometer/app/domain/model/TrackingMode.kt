@@ -6,6 +6,6 @@ enum class TrackingMode(val preferenceValue: String) {
 
     companion object {
         fun fromPreference(value: String?): TrackingMode =
-            entries.firstOrNull { it.preferenceValue == value } ?: HANDHELD
+            entries.firstOrNull { it.preferenceValue == value } ?: FIXED
     }
 }

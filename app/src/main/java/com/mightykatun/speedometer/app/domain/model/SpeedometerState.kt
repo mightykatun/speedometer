@@ -9,5 +9,6 @@ data class SpeedometerState(
     val maxSatelliteCount: Int = 0,
     val speedTrend: List<SpeedTrendSample> = emptyList(),
     val currentPosition: PositionFix? = null,
-    val positionTrail: List<PositionFix> = emptyList()
+    val positionTrail: List<PositionFix> = emptyList(),
+    val positionTrailSegmentStarts: List<Long> = emptyList()
 )
