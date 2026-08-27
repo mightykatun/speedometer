@@ -15,6 +15,8 @@ Download and install the APK from [Releases](https://github.com/mightykatun/spee
 * **Accuracy-aware Speed:** GNSS speed is filtered by its reported uncertainty without hiding valid low-speed readings. The display shows its current uncertainty in km/h, mph, knots, or m/s.
 * **Tracking Modes:** `gnss` uses satellite speed only. `gnss+imu` adds bounded prediction for a rigidly mounted phone.
 * **Speed Trend:** A live-smoothed scrolling tail shows the most recent 30 seconds without exposing discrete refresh steps.
+* **Offline Position Trail:** A north-up, auto-fitting monochrome trace shows GNSS altitude, current course, and the complete session path without map tiles, network access, or stored location history.
+* **Focused Speed Display:** Double-tap the speed numbers to hide the surrounding HUD without resetting the session. Landscape uses the enlarged focused display automatically.
 * **Refresh Control:** The complete measurement UI refreshes every 0.5, 1, or 2 seconds while acquisition and statistics continue at full rate.
 * **Satellite Status:** Real-time GNSS satellite count with a red/green status indicator.
 * **Session Statistics:**
@@ -36,7 +38,7 @@ Download and install the APK from [Releases](https://github.com/mightykatun/spee
 > **Note:** This app is designed as an active dashboard.
 
 * **Active Only:** Speed and stats are tracked only while the screen is on and the app is visible.
-* **Auto-Reset:** Minimizing the app, turning off the screen, or switching apps **immediately wipes** all session data (current speed, max speed, satellite counts).
+* **Auto-Reset:** Minimizing the app, turning off the screen, or switching apps **immediately wipes** all session data (current speed, max speed, satellite counts, and position trail).
 * **Battery Safe:** The app aggressively disconnects from the GPS hardware the moment it loses focus.
 
 ## Preview

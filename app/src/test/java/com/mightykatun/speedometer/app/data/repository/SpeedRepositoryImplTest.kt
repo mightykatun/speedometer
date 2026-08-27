@@ -8,6 +8,7 @@ import android.location.LocationManager
 import com.mightykatun.speedometer.app.domain.SpeedEstimator
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
 import com.mightykatun.speedometer.app.domain.model.GnssMeasurement
+import com.mightykatun.speedometer.app.domain.model.PositionFix
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import com.mightykatun.speedometer.app.domain.model.TrackingMode
 import java.util.ArrayDeque
@@ -214,12 +215,14 @@ class SpeedRepositoryImplTest {
         val recording = Recording()
         fixture.repository.start(TrackingMode.HANDHELD, recording)
         fixture.worker.runAll()
+        fixture.location.emitLocation(locationAt(1_000_000_000L, horizontalAccuracy = 5f))
 
         fixture.repository.stopUpdates()
         fixture.main.runAll()
 
         assertTrue(recording.modes.isEmpty())
         assertTrue(recording.satelliteCounts.isEmpty())
+        assertTrue(recording.positionFixes.isEmpty())
     }
 
     @Test
@@ -348,6 +351,54 @@ class SpeedRepositoryImplTest {
     }
 
     @Test
+    fun `position fixes retain coordinates and normalized heading`() {
+        val fix = requireNotNull(
+            createPositionFix(
+                locationAt(
+                    timestampNanos = 10_000_000_000L,
+                    bearing = -45f,
+                    horizontalAccuracy = 4.5f,
+                    latitude = 51.5074,
+                    longitude = -0.1278,
+                    altitude = 35.4
+                )
+            )
+        )
+
+        assertEquals(51.5074, fix.latitudeDegrees, 0.0)
+        assertEquals(-0.1278, fix.longitudeDegrees, 0.0)
+        assertEquals(315f, fix.headingDegrees!!, 0f)
+        assertEquals(4.5f, fix.horizontalAccuracyMeters, 0f)
+        assertEquals(35.4, fix.altitudeMeters!!, 0.0)
+        assertEquals(10_000_000_000L, fix.timestampNanos)
+    }
+
+    @Test
+    fun `invalid position coordinates are not delivered`() {
+        val fixture = Fixture()
+        val recording = Recording()
+        fixture.repository.start(TrackingMode.HANDHELD, recording)
+        fixture.worker.runAll()
+        fixture.main.runAll()
+
+        fixture.location.emitLocation(
+            locationAt(
+                timestampNanos = 11_000_000_000L,
+                latitude = Double.NaN,
+                horizontalAccuracy = 5f
+            )
+        )
+        fixture.main.runAll()
+
+        assertTrue(recording.positionFixes.isEmpty())
+    }
+
+    @Test
+    fun `position fixes require reported horizontal accuracy`() {
+        assertNull(createPositionFix(locationAt(timestampNanos = 12_000_000_000L)))
+    }
+
+    @Test
     fun `provider re-enable does not report recovery`() {
         val fixture = Fixture()
         val recording = Recording()
@@ -446,9 +497,16 @@ class SpeedRepositoryImplTest {
         timestampNanos: Long,
         speed: Float = 5f,
         bearing: Float? = null,
-        horizontalAccuracy: Float? = null
+        horizontalAccuracy: Float? = null,
+        latitude: Double = 0.0,
+        longitude: Double = 0.0,
+        altitude: Double? = null
     ): Location = mock<Location>().also { location ->
         whenever(location.elapsedRealtimeNanos).thenReturn(timestampNanos)
+        whenever(location.latitude).thenReturn(latitude)
+        whenever(location.longitude).thenReturn(longitude)
+        whenever(location.hasAltitude()).thenReturn(altitude != null)
+        whenever(location.altitude).thenReturn(altitude ?: 0.0)
         whenever(location.hasSpeed()).thenReturn(true)
         whenever(location.speed).thenReturn(speed)
         whenever(location.hasBearing()).thenReturn(bearing != null)
@@ -484,6 +542,7 @@ class SpeedRepositoryImplTest {
     private class Recording {
         val estimates = mutableListOf<SpeedEstimate>()
         val satelliteCounts = mutableListOf<Int>()
+        val positionFixes = mutableListOf<PositionFix>()
         val errors = mutableListOf<RepositoryError>()
         val modeResults = mutableListOf<TrackingModeResult>()
         val modes: List<TrackingMode>
@@ -502,6 +561,7 @@ class SpeedRepositoryImplTest {
                 recording.measurementEvents += "estimate"
             },
             onSatelliteCount = recording.satelliteCounts::add,
+            onPositionFix = recording.positionFixes::add,
             onGpsProviderEnabled = { recording.providerEnabledCount++ },
             onGpsRecoveryAccepted = {
                 recording.recoveryCount++

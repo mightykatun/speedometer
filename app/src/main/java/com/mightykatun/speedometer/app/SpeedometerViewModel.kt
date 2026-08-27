@@ -7,10 +7,13 @@ import androidx.lifecycle.ViewModel
 import com.mightykatun.speedometer.app.data.repository.RepositoryError
 import com.mightykatun.speedometer.app.domain.SessionStatisticsTracker
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
+import com.mightykatun.speedometer.app.domain.model.PositionFix
 import com.mightykatun.speedometer.app.domain.model.RefreshRate
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import com.mightykatun.speedometer.app.domain.model.SpeedometerState
 import com.mightykatun.speedometer.app.domain.model.SpeedTrendSample
+import kotlin.math.cos
+import kotlin.math.hypot
 
 class SpeedometerViewModel(
     private val sessionTracker: SessionStatisticsTracker
@@ -25,6 +28,10 @@ class SpeedometerViewModel(
     private var latestSatelliteCount = 0
     private var latestMaxSatelliteCount = 0
     private var lastPresentationTimestampNanos = 0L
+    private val positionTrail = ArrayList<PositionFix>()
+    private var latestPositionFix: PositionFix? = null
+    private var pendingInitialPositionFix: PositionFix? = null
+    private var lastPositionPresentationTimestampNanos = 0L
 
     var state by mutableStateOf(SpeedometerState())
         private set
@@ -68,10 +75,38 @@ class SpeedometerViewModel(
         }
     }
 
+    fun onPositionFixReceived(fix: PositionFix) {
+        if (!sessionActive || !fix.isUsableForTrail()) return
+        val previous = latestPositionFix
+        if (previous == null) {
+            val pending = pendingInitialPositionFix
+            when {
+                pending == null -> pendingInitialPositionFix = fix
+                fix.timestampNanos < pending.timestampNanos -> Unit
+                fix.timestampNanos == pending.timestampNanos -> pendingInitialPositionFix = fix
+                isPlausiblePositionTransition(pending, fix) -> {
+                    pendingInitialPositionFix = null
+                    recordPositionFix(pending)
+                    recordPositionFix(fix)
+                    publishPositionIfDue()
+                }
+                else -> pendingInitialPositionFix = fix
+            }
+            return
+        }
+        if (fix.timestampNanos < previous.timestampNanos) return
+        val replacesLatest = fix.timestampNanos == previous.timestampNanos
+        if (!isPlausiblePositionTransition(previous, fix)) return
+
+        recordPositionFix(fix)
+        publishPositionIfDue(force = replacesLatest)
+    }
+
     fun onRefreshRateChanged(refreshRate: RefreshRate) {
         if (this.refreshRate == refreshRate) return
         this.refreshRate = refreshRate
         publishPresentationIfDue(force = true)
+        publishPositionIfDue(force = true)
     }
 
     fun onSessionStart() {
@@ -94,6 +129,10 @@ class SpeedometerViewModel(
         latestSatelliteCount = 0
         latestMaxSatelliteCount = 0
         lastPresentationTimestampNanos = 0L
+        positionTrail.clear()
+        latestPositionFix = null
+        pendingInitialPositionFix = null
+        lastPositionPresentationTimestampNanos = 0L
     }
 
     fun onRepositoryError(error: RepositoryError) {
@@ -179,6 +218,78 @@ class SpeedometerViewModel(
         )
     }
 
+    private fun publishPositionIfDue(force: Boolean = false) {
+        val latest = latestPositionFix ?: return
+        val refreshDue = lastPositionPresentationTimestampNanos == 0L ||
+            latest.timestampNanos - lastPositionPresentationTimestampNanos >= refreshRate.intervalNanos
+        if (!force && !refreshDue) return
+
+        state = state.copy(
+            currentPosition = latest,
+            positionTrail = positionTrail.toList()
+        )
+        lastPositionPresentationTimestampNanos = maxOf(
+            lastPositionPresentationTimestampNanos,
+            latest.timestampNanos
+        )
+    }
+
+    private fun compactPositionTrailIfNeeded() {
+        if (positionTrail.size <= MAX_TRAIL_POINTS) return
+        val lastIndex = positionTrail.lastIndex
+        val compacted = ArrayList<PositionFix>(positionTrail.size / 2 + 1)
+        compacted += positionTrail.first()
+        for (index in 2 until lastIndex step 2) compacted += positionTrail[index]
+        if (compacted.last().timestampNanos != positionTrail[lastIndex].timestampNanos) {
+            compacted += positionTrail[lastIndex]
+        }
+        positionTrail.clear()
+        positionTrail.addAll(compacted)
+    }
+
+    private fun recordPositionFix(fix: PositionFix) {
+        latestPositionFix = fix
+        when {
+            positionTrail.isEmpty() -> positionTrail += fix
+            positionTrail.last().timestampNanos == fix.timestampNanos -> {
+                positionTrail[positionTrail.lastIndex] = fix
+            }
+            positionDistanceMeters(positionTrail.last(), fix) >= MIN_TRAIL_STEP_METERS -> {
+                positionTrail += fix
+                compactPositionTrailIfNeeded()
+            }
+        }
+    }
+
+    private fun isPlausiblePositionTransition(first: PositionFix, second: PositionFix): Boolean {
+        val elapsedSeconds = (second.timestampNanos - first.timestampNanos) / 1_000_000_000.0
+        if (elapsedSeconds < 0.0) return false
+        val accuracyAllowance = 2.0 *
+            (first.horizontalAccuracyMeters + second.horizontalAccuracyMeters)
+        val maximumDistance = accuracyAllowance + MAX_TRAIL_SPEED_METERS_PER_SECOND * elapsedSeconds
+        return positionDistanceMeters(first, second) <= maximumDistance
+    }
+
+    private fun PositionFix.isUsableForTrail(): Boolean =
+        timestampNanos > 0L &&
+            latitudeDegrees.isFinite() && latitudeDegrees in -90.0..90.0 &&
+            longitudeDegrees.isFinite() && longitudeDegrees in -180.0..180.0 &&
+            headingDegrees?.isFinite() != false &&
+            altitudeMeters?.isFinite() != false &&
+            horizontalAccuracyMeters.isFinite() &&
+            horizontalAccuracyMeters in 0f..MAX_TRAIL_ACCURACY_METERS
+
+    private fun positionDistanceMeters(first: PositionFix, second: PositionFix): Double {
+        val meanLatitudeRadians = Math.toRadians(
+            (first.latitudeDegrees + second.latitudeDegrees) / 2.0
+        )
+        val eastRadians = Math.toRadians(
+            Math.IEEEremainder(second.longitudeDegrees - first.longitudeDegrees, 360.0)
+        ) * cos(meanLatitudeRadians)
+        val northRadians = Math.toRadians(second.latitudeDegrees - first.latitudeDegrees)
+        return hypot(eastRadians, northRadians) * EARTH_RADIUS_METERS
+    }
+
     private fun updatedSpeedTrend(
         existing: List<SpeedTrendSample>,
         timestampNanos: Long,
@@ -210,5 +321,10 @@ class SpeedometerViewModel(
         const val GPS_STARTUP_ERROR_MESSAGE = "Unable to start GPS"
         const val TREND_WINDOW_NANOS = 30_000_000_000L
         const val MAX_TREND_SAMPLES = 360
+        const val MAX_TRAIL_POINTS = 2_048
+        const val MIN_TRAIL_STEP_METERS = 3.0
+        const val MAX_TRAIL_ACCURACY_METERS = 100f
+        const val MAX_TRAIL_SPEED_METERS_PER_SECOND = 400.0
+        const val EARTH_RADIUS_METERS = 6_371_000.0
     }
 }

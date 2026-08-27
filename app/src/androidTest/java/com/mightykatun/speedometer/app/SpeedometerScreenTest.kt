@@ -1,22 +1,30 @@
 package com.mightykatun.speedometer.app
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertWidthIsAtLeast
+import androidx.compose.ui.test.doubleClick
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
+import com.mightykatun.speedometer.app.domain.model.PositionFix
 import com.mightykatun.speedometer.app.domain.model.RefreshRate
 import com.mightykatun.speedometer.app.domain.model.SpeedUnit
 import com.mightykatun.speedometer.app.domain.model.SpeedometerState
 import com.mightykatun.speedometer.app.domain.model.TrackingMode
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
@@ -31,6 +39,7 @@ class SpeedometerScreenTest {
         var refreshClicks = 0
         var resetClicks = 0
         var pipClicks = 0
+        var speedFocusToggles = 0
 
         composeRule.setContent {
             SpeedometerScreen(
@@ -53,7 +62,8 @@ class SpeedometerScreenTest {
                 onRetry = {},
                 onEnterPip = { pipClicks++ },
                 onRequestPermission = {},
-                onOpenSettings = {}
+                onOpenSettings = {},
+                onSpeedDoubleTap = { speedFocusToggles++ }
             )
         }
 
@@ -75,6 +85,8 @@ class SpeedometerScreenTest {
         composeRule.onNodeWithText("float")
             .assertWidthIsAtLeast(48.dp)
             .performClick()
+        composeRule.onNodeWithContentDescription("Speed display")
+            .performTouchInput { doubleClick() }
 
         composeRule.runOnIdle {
             assertEquals(1, unitClicks)
@@ -82,7 +94,204 @@ class SpeedometerScreenTest {
             assertEquals(1, refreshClicks)
             assertEquals(1, resetClicks)
             assertEquals(1, pipClicks)
+            assertEquals(1, speedFocusToggles)
         }
+    }
+
+    @Test
+    fun focusedSpeedDisplayHidesChromeButKeepsStatusLine() {
+        val current = PositionFix(51.0, 4.0, 90f, 5f, 2_000_000_000L)
+        composeRule.setContent {
+            SpeedometerScreen(
+                state = SpeedometerState(
+                    currentSpeedKmh = 72f,
+                    speedAccuracyKmh = 2f,
+                    estimateQuality = EstimateQuality.TRACKING,
+                    maxSpeedKmh = 90f,
+                    satelliteCount = 6,
+                    maxSatelliteCount = 8,
+                    currentPosition = current,
+                    positionTrail = listOf(current)
+                ),
+                error = null,
+                warning = null,
+                signalMessage = null,
+                isInPipMode = false,
+                speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
+                trackingMode = TrackingMode.HANDHELD,
+                refreshRate = RefreshRate.ONE_SECOND,
+                trackingModeEnabled = true,
+                supportsPip = true,
+                permissionMessage = null,
+                permissionCanRequest = false,
+                onSpeedUnitClick = {},
+                onTrackingModeChange = {},
+                onRefreshRateChange = {},
+                onReset = {},
+                onRetry = {},
+                onEnterPip = {},
+                onRequestPermission = {},
+                onOpenSettings = {},
+                isSpeedFocusMode = true
+            )
+        }
+
+        composeRule.onNodeWithContentDescription("Speed display").assertIsDisplayed()
+        composeRule.onNodeWithText("72").assertIsDisplayed()
+        composeRule.onNodeWithText(".00").assertIsDisplayed()
+        composeRule.onNodeWithText("km/h").assertIsDisplayed()
+        composeRule.onNodeWithText("± 2.0 km/h").assertIsDisplayed()
+        composeRule.onNodeWithText("speedometer v${BuildConfig.VERSION_NAME}").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("North-up position trail").assertDoesNotExist()
+        composeRule.onNodeWithText("top speed: ").assertDoesNotExist()
+        composeRule.onNodeWithText("reset").assertDoesNotExist()
+        composeRule.onNodeWithText("float").assertDoesNotExist()
+    }
+
+    @Test
+    fun landscapeAlwaysUsesLargeFocusedSpeedDisplay() {
+        composeRule.setContent {
+            Box(modifier = Modifier.size(800.dp, 400.dp)) {
+                SpeedometerScreen(
+                    state = SpeedometerState(
+                        currentSpeedKmh = 72f,
+                        speedAccuracyKmh = 2f,
+                        estimateQuality = EstimateQuality.TRACKING,
+                        maxSpeedKmh = 90f,
+                        satelliteCount = 6,
+                        maxSatelliteCount = 8
+                    ),
+                    error = null,
+                    warning = null,
+                    signalMessage = null,
+                    isInPipMode = false,
+                    speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
+                    trackingMode = TrackingMode.HANDHELD,
+                    refreshRate = RefreshRate.ONE_SECOND,
+                    trackingModeEnabled = true,
+                    supportsPip = true,
+                    permissionMessage = null,
+                    permissionCanRequest = false,
+                    onSpeedUnitClick = {},
+                    onTrackingModeChange = {},
+                    onRefreshRateChange = {},
+                    onReset = {},
+                    onRetry = {},
+                    onEnterPip = {},
+                    onRequestPermission = {},
+                    onOpenSettings = {},
+                    isSpeedFocusMode = false
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Speed display")
+            .assertHeightIsAtLeast(150.dp)
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("± 2.0 km/h").assertIsDisplayed()
+        composeRule.onNodeWithText("speedometer v${BuildConfig.VERSION_NAME}").assertDoesNotExist()
+        composeRule.onNodeWithText("top speed: ").assertDoesNotExist()
+        composeRule.onNodeWithText("reset").assertDoesNotExist()
+    }
+
+    @Test
+    fun positionTrailExposesNorthUpHeading() {
+        val first = PositionFix(51.0, 4.0, null, 5f, 1_000_000_000L)
+        val current = PositionFix(
+            51.001,
+            4.001,
+            45f,
+            5f,
+            2_000_000_000L,
+            altitudeMeters = 123.4
+        )
+        composeRule.setContent {
+            PositionTrailMap(
+                trail = listOf(first, current),
+                current = current,
+                isStationary = false,
+                primaryColor = Color.White,
+                secondaryColor = Color.Gray,
+                modifier = Modifier.size(300.dp, 180.dp)
+            )
+        }
+
+        composeRule.onNodeWithContentDescription("North-up position trail")
+            .assert(
+                SemanticsMatcher.expectValue(
+                    SemanticsProperties.StateDescription,
+                    "Altitude 123 m, Heading 045\u00b0 NE"
+                )
+            )
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("123 m").assertIsDisplayed()
+        composeRule.onNodeWithText("045\u00b0 NE").assertIsDisplayed()
+    }
+
+    @Test
+    fun stationaryPositionUsesDotSemanticsWithoutHeadingLabel() {
+        val current = PositionFix(51.0, 4.0, 45f, 5f, 1_000_000_000L)
+        composeRule.setContent {
+            PositionTrailMap(
+                trail = listOf(current),
+                current = current,
+                isStationary = true,
+                primaryColor = Color.White,
+                secondaryColor = Color.Gray,
+                modifier = Modifier.size(300.dp, 180.dp)
+            )
+        }
+
+        composeRule.onNodeWithContentDescription("North-up position trail")
+            .assert(
+                SemanticsMatcher.expectValue(
+                    SemanticsProperties.StateDescription,
+                    "Altitude unavailable, Stationary"
+                )
+            )
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("-- m").assertIsDisplayed()
+        composeRule.onNodeWithText("045\u00b0 NE").assertDoesNotExist()
+    }
+
+    @Test
+    fun positionTrailStaysAboveCenteredSpeedWithWarning() {
+        val first = PositionFix(51.0, 4.0, 45f, 5f, 1_000_000_000L)
+        val current = PositionFix(51.001, 4.001, 45f, 5f, 2_000_000_000L)
+        composeRule.setContent {
+            Box(modifier = Modifier.size(320.dp, 800.dp)) {
+                SpeedometerScreen(
+                    state = SpeedometerState(
+                        currentPosition = current,
+                        positionTrail = listOf(first, current)
+                    ),
+                    error = null,
+                    warning = "Motion sensors unavailable; using GNSS only",
+                    signalMessage = null,
+                    isInPipMode = false,
+                    speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
+                    trackingMode = TrackingMode.HANDHELD,
+                    refreshRate = RefreshRate.ONE_SECOND,
+                    trackingModeEnabled = true,
+                    supportsPip = true,
+                    permissionMessage = null,
+                    permissionCanRequest = false,
+                    onSpeedUnitClick = {},
+                    onTrackingModeChange = {},
+                    onRefreshRateChange = {},
+                    onReset = {},
+                    onRetry = {},
+                    onEnterPip = {},
+                    onRequestPermission = {},
+                    onOpenSettings = {}
+                )
+            }
+        }
+
+        val mapBounds = composeRule.onNodeWithContentDescription("North-up position trail")
+            .fetchSemanticsNode().boundsInRoot
+        val speedBounds = composeRule.onNodeWithText("--").fetchSemanticsNode().boundsInRoot
+        assertTrue(mapBounds.bottom <= speedBounds.top)
     }
 
     @Test

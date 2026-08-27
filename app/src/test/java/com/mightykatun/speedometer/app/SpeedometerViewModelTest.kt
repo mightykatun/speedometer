@@ -6,6 +6,7 @@ import com.mightykatun.speedometer.app.data.repository.RepositoryError
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
 import com.mightykatun.speedometer.app.domain.model.MaximumCandidate
 import com.mightykatun.speedometer.app.domain.model.MaximumCandidateChange
+import com.mightykatun.speedometer.app.domain.model.PositionFix
 import com.mightykatun.speedometer.app.domain.model.RefreshRate
 import com.mightykatun.speedometer.app.domain.model.SessionConfig
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
@@ -141,6 +142,97 @@ class SpeedometerViewModelTest {
         viewModel.onSessionStart()
 
         assertEquals(18f, viewModel.state.currentSpeedKmh!!, 0.001f)
+    }
+
+    @Test
+    fun `position trail follows refresh rate and clears with the session`() {
+        viewModel.onSessionStart()
+        val first = position(1_000, latitude = 51.0)
+        val second = position(1_500, latitude = 51.0001)
+        val third = position(2_000, latitude = 51.0002)
+        val fourth = position(2_500, latitude = 51.0003)
+
+        viewModel.onPositionFixReceived(first)
+        assertNull(viewModel.state.currentPosition)
+
+        viewModel.onPositionFixReceived(second)
+        assertEquals(second, viewModel.state.currentPosition)
+
+        viewModel.onPositionFixReceived(third)
+        assertEquals(second, viewModel.state.currentPosition)
+
+        viewModel.onPositionFixReceived(fourth)
+
+        assertEquals(fourth, viewModel.state.currentPosition)
+        assertEquals(listOf(first, second, third, fourth), viewModel.state.positionTrail)
+
+        viewModel.onSessionReset()
+
+        assertNull(viewModel.state.currentPosition)
+        assertTrue(viewModel.state.positionTrail.isEmpty())
+    }
+
+    @Test
+    fun `position trail rejects poor and out-of-order fixes without recording jitter`() {
+        viewModel.onSessionStart()
+        val first = position(1_000, latitude = 51.0)
+        val nearby = position(2_000, latitude = 51.000005)
+
+        viewModel.onPositionFixReceived(first)
+        viewModel.onPositionFixReceived(nearby)
+        viewModel.onPositionFixReceived(
+            position(3_000, latitude = 52.0, horizontalAccuracyMeters = 101f)
+        )
+        viewModel.onPositionFixReceived(position(500, latitude = 50.0))
+
+        assertEquals(nearby, viewModel.state.currentPosition)
+        assertEquals(listOf(first), viewModel.state.positionTrail)
+    }
+
+    @Test
+    fun `position trail replaces an uncorroborated startup outlier`() {
+        viewModel.onSessionStart()
+        viewModel.onPositionFixReceived(position(1_000, latitude = 10.0))
+        val firstReliable = position(2_000, latitude = 51.0)
+        val secondReliable = position(3_000, latitude = 51.0001)
+
+        viewModel.onPositionFixReceived(firstReliable)
+        viewModel.onPositionFixReceived(secondReliable)
+
+        assertEquals(secondReliable, viewModel.state.currentPosition)
+        assertEquals(listOf(firstReliable, secondReliable), viewModel.state.positionTrail)
+    }
+
+    @Test
+    fun `equal-timestamp position outlier cannot replace the current fix`() {
+        viewModel.onSessionStart()
+        val first = position(1_000, latitude = 51.0)
+        val current = position(2_000, latitude = 51.0001)
+        viewModel.onPositionFixReceived(first)
+        viewModel.onPositionFixReceived(current)
+
+        viewModel.onPositionFixReceived(position(2_000, latitude = 10.0))
+
+        assertEquals(current, viewModel.state.currentPosition)
+        assertEquals(listOf(first, current), viewModel.state.positionTrail)
+    }
+
+    @Test
+    fun `long position trail stays bounded while retaining its endpoints`() {
+        viewModel.onSessionStart()
+
+        for (index in 1..2_100) {
+            viewModel.onPositionFixReceived(
+                position(
+                    milliseconds = index * 1_000L,
+                    latitude = 40.0 + index * 0.0001
+                )
+            )
+        }
+
+        assertTrue(viewModel.state.positionTrail.size <= 2_048)
+        assertEquals(1_000_000_000L, viewModel.state.positionTrail.first().timestampNanos)
+        assertEquals(2_100_000_000_000L, viewModel.state.positionTrail.last().timestampNanos)
     }
 
     @Test
@@ -285,5 +377,18 @@ class SpeedometerViewModelTest {
         timestampNanos = timestampNanos,
         maximumWarmupStartTimestampNanos = warmupStartTimestampNanos,
         maximumCandidateChanges = candidateChanges
+    )
+
+    private fun position(
+        milliseconds: Long,
+        latitude: Double,
+        longitude: Double = 4.0,
+        horizontalAccuracyMeters: Float = 5f
+    ) = PositionFix(
+        latitudeDegrees = latitude,
+        longitudeDegrees = longitude,
+        headingDegrees = 0f,
+        horizontalAccuracyMeters = horizontalAccuracyMeters,
+        timestampNanos = milliseconds * 1_000_000L
     )
 }

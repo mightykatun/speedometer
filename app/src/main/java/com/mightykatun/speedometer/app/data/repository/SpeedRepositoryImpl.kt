@@ -15,6 +15,7 @@ import android.os.Bundle
 import com.mightykatun.speedometer.app.domain.SpeedEstimator
 import com.mightykatun.speedometer.app.domain.model.GnssMeasurement
 import com.mightykatun.speedometer.app.domain.model.MotionMeasurement
+import com.mightykatun.speedometer.app.domain.model.PositionFix
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import com.mightykatun.speedometer.app.domain.model.TrackingMode
 import java.util.concurrent.atomic.AtomicLong
@@ -57,6 +58,7 @@ class SpeedRepositoryImpl private constructor(
         trackingMode: TrackingMode,
         onEstimate: (SpeedEstimate) -> Unit,
         onSatelliteCount: (Int) -> Unit,
+        onPositionFix: (PositionFix) -> Unit,
         onGpsProviderEnabled: () -> Unit,
         onGpsRecoveryAccepted: () -> Unit,
         onPermissionRequired: () -> Unit,
@@ -67,6 +69,7 @@ class SpeedRepositoryImpl private constructor(
         val callbacks = Callbacks(
             onEstimate,
             onSatelliteCount,
+            onPositionFix,
             onGpsProviderEnabled,
             onGpsRecoveryAccepted,
             onPermissionRequired,
@@ -194,6 +197,7 @@ class SpeedRepositoryImpl private constructor(
                 val measurement = createMeasurement(location)
                 val acceptedCorrectionTimestamp = estimator.ingestGnssMeasurement(measurement)
                 emitEstimate(estimator.snapshotAt(location.elapsedRealtimeNanos))
+                createPositionFix(location)?.let(::emitPositionFix)
                 if (providerRecoveryPending &&
                     acceptedCorrectionTimestamp != null &&
                     acceptedCorrectionTimestamp > providerRecoveryBoundaryNanos
@@ -511,6 +515,13 @@ class SpeedRepositoryImpl private constructor(
             }
         }
 
+        private fun emitPositionFix(fix: PositionFix) {
+            val target = delivery
+            mainDispatcher.post {
+                if (target.valid) target.callbacks.onPositionFix(fix)
+            }
+        }
+
         private fun emitGpsProviderEnabled() {
             val target = delivery
             mainDispatcher.post {
@@ -556,6 +567,7 @@ class SpeedRepositoryImpl private constructor(
     private data class Callbacks(
         val onEstimate: (SpeedEstimate) -> Unit,
         val onSatelliteCount: (Int) -> Unit,
+        val onPositionFix: (PositionFix) -> Unit,
         val onGpsProviderEnabled: () -> Unit,
         val onGpsRecoveryAccepted: () -> Unit,
         val onPermissionRequired: () -> Unit,
@@ -636,6 +648,26 @@ internal fun createGnssMeasurement(
         magneticDeclinationDegrees = magneticDeclinationDegrees.takeIf { includeCourseFields },
         satelliteCount = satelliteCount,
         timestampNanos = location.elapsedRealtimeNanos
+    )
+}
+
+internal fun createPositionFix(location: Location): PositionFix? {
+    val latitude = location.latitude.takeIf { it.isFinite() && it in -90.0..90.0 } ?: return null
+    val longitude = location.longitude.takeIf { it.isFinite() && it in -180.0..180.0 } ?: return null
+    val timestampNanos = location.elapsedRealtimeNanos.takeIf { it > 0L } ?: return null
+    val heading = location.bearing.takeIf { location.hasBearing() && it.isFinite() }
+        ?.let { ((it % 360f) + 360f) % 360f }
+    val horizontalAccuracy = location.accuracy.takeIf {
+        location.hasAccuracy() && it.isFinite() && it >= 0f
+    } ?: return null
+    val altitude = location.altitude.takeIf { location.hasAltitude() && it.isFinite() }
+    return PositionFix(
+        latitudeDegrees = latitude,
+        longitudeDegrees = longitude,
+        headingDegrees = heading,
+        horizontalAccuracyMeters = horizontalAccuracy,
+        timestampNanos = timestampNanos,
+        altitudeMeters = altitude
     )
 }
 

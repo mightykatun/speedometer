@@ -175,7 +175,10 @@ No watchdog injects fake zero readings.
 
 - Acquisition starts in `onStart` after precise-location permission is available
 - Acquisition and sensor listeners survive configuration recreation but stop when the app backgrounds
-- Session statistics reset when the app backgrounds
+- Session statistics and the in-memory position trail reset when the app backgrounds
+- The trail starts only after two accurate, physically plausible fixes, samples movement at 3 m spacing, progressively compacts at 2,048 points, and always retains its first and latest anchors
+- Trail projection is north-up and continuously zooms to fit the complete session path; it is hidden when the viewport cannot keep it clear of the speed display
+- Double-tapping the numeric speed toggles a presentation-only focused display without resetting acquisition or session state; landscape always uses the enlarged focused layout
 - Display unit, requested tracking mode, and global refresh interval persist locally
 - A non-sensitive permission-requested marker persists only to distinguish first request from settings-only denial; permission grants and in-flight state do not persist as behavioral preferences
 - No location, motion, or session history leaves the device
@@ -204,6 +207,8 @@ No watchdog injects fake zero readings.
 app/src/main/java/com/mightykatun/speedometer/app/
 ├── AccuracyLevel.kt
 ├── MainActivity.kt
+├── PositionTrailMap.kt
+├── PositionTrailProjection.kt
 ├── SpeedRepositoryViewModel.kt
 ├── SpeedometerViewModel.kt
 ├── data/repository/
@@ -220,6 +225,7 @@ app/src/main/java/com/mightykatun/speedometer/app/
     │   ├── GnssMeasurement.kt
     │   ├── MaximumCandidate.kt
     │   ├── MotionMeasurement.kt
+    │   ├── PositionFix.kt
     │   ├── SessionConfig.kt
     │   ├── SessionStatistics.kt
     │   ├── SpeedEstimate.kt
@@ -232,7 +238,7 @@ app/src/main/java/com/mightykatun/speedometer/app/
     └── util/SpeedConverter.kt
 ```
 
-No third-party location or sensor-fusion package is used. Android's composite sensors provide orientation and gravity removal; the app-specific two-state estimator remains explicit and JVM-tested.
+No third-party map, location, or sensor-fusion package is used. The position trail is projected and rendered locally without tiles or network access. Android's composite sensors provide orientation and gravity removal; the app-specific two-state estimator remains explicit and JVM-tested.
 
 ## Verification
 
@@ -242,7 +248,7 @@ Automated gates:
 ./gradlew --no-build-cache clean test lint assembleDebug assembleRelease assembleDebugAndroidTest
 ```
 
-JVM tests cover repository lifecycle/retry/generation ordering, low-speed preservation, invalid measurements, uncertainty percentage bands, outliers, reacquisition probation, replay-aware maximum candidates, GNSS isolation, GNSS + IMU prediction, trend retention, spike/vertical-shock rejection, violent-motion quarantine, orientation freshness, sensor-rate invariance, course expiry, delayed replay, duplicate inputs, history compaction, stationary evidence, safe mode transitions, and stale-data unavailability. Compose instrumentation tests cover mode, unit, reset, float, and permission-recovery actions.
+JVM tests cover repository lifecycle/retry/generation ordering, low-speed preservation, invalid measurements, uncertainty percentage bands, outliers, reacquisition probation, replay-aware maximum candidates, GNSS isolation, GNSS + IMU prediction, trend retention, position-trail gating/compaction/projection, spike/vertical-shock rejection, violent-motion quarantine, orientation freshness, sensor-rate invariance, course expiry, delayed replay, duplicate inputs, history compaction, stationary evidence, safe mode transitions, and stale-data unavailability. Compose instrumentation tests cover mode, unit, reset, float, permission-recovery actions, focused portrait/landscape layouts, and position-trail accessibility/layout.
 
 ## Field Validation
 

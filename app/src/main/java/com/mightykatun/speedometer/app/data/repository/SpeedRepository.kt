@@ -1,6 +1,7 @@
 package com.mightykatun.speedometer.app.data.repository
 
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
+import com.mightykatun.speedometer.app.domain.model.PositionFix
 import com.mightykatun.speedometer.app.domain.model.TrackingMode
 
 data class TrackingModeResult(
@@ -21,6 +22,7 @@ interface SpeedRepository {
         trackingMode: TrackingMode,
         onEstimate: (SpeedEstimate) -> Unit,
         onSatelliteCount: (Int) -> Unit,
+        onPositionFix: (PositionFix) -> Unit,
         onGpsProviderEnabled: () -> Unit,
         onGpsRecoveryAccepted: () -> Unit,
         onPermissionRequired: () -> Unit,

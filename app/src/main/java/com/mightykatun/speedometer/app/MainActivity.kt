@@ -25,6 +25,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Button
@@ -43,8 +44,10 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -76,6 +79,7 @@ class MainActivity : ComponentActivity() {
     private val speedRepository get() = repositoryViewModel.repository
 
     private var isInPipMode by mutableStateOf(false)
+    private var isSpeedFocusMode by mutableStateOf(false)
     private var speedUnit by mutableStateOf(SpeedUnit.KILOMETERS_PER_HOUR)
     private var effectiveTrackingMode by mutableStateOf(TrackingMode.HANDHELD)
     private var refreshRate by mutableStateOf(RefreshRate.ONE_SECOND)
@@ -147,7 +151,9 @@ class MainActivity : ComponentActivity() {
                 onRetry = { restartMeasurements() },
                 onEnterPip = { enterPipMode() },
                 onRequestPermission = { requestLocationPermission() },
-                onOpenSettings = { openAppSettings() }
+                onOpenSettings = { openAppSettings() },
+                isSpeedFocusMode = isSpeedFocusMode,
+                onSpeedDoubleTap = { isSpeedFocusMode = !isSpeedFocusMode }
             )
         }
     }
@@ -227,6 +233,7 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         if (!isChangingConfigurations) {
+            isSpeedFocusMode = false
             speedRepository.stopUpdates()
             viewModel.onSessionReset()
         }
@@ -247,6 +254,7 @@ class MainActivity : ComponentActivity() {
             trackingMode = requestedTrackingMode,
             onEstimate = viewModel::onSpeedEstimateReceived,
             onSatelliteCount = viewModel::onSatelliteCountReceived,
+            onPositionFix = viewModel::onPositionFixReceived,
             onGpsProviderEnabled = viewModel::onGpsProviderEnabled,
             onGpsRecoveryAccepted = viewModel::onGpsRecoveryAccepted,
             onPermissionRequired = {
@@ -390,7 +398,9 @@ fun SpeedometerScreen(
     onRetry: () -> Unit,
     onEnterPip: () -> Unit,
     onRequestPermission: () -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    isSpeedFocusMode: Boolean = false,
+    onSpeedDoubleTap: () -> Unit = {}
 ) {
     val isDark = isSystemInDarkTheme()
     val backgroundColor = if (isDark) Color.Black else Color.White
@@ -415,6 +425,7 @@ fun SpeedometerScreen(
     val currentSpeed = displayedSpeedKmh?.let(speedUnit::fromKilometersPerHour)
     val currentAccuracy = state.speedAccuracyKmh?.let(speedUnit::fromKilometersPerHour)
     val maxSpeed = speedUnit.fromKilometersPerHour(state.maxSpeedKmh)
+    val currentOnSpeedDoubleTap by rememberUpdatedState(onSpeedDoubleTap)
 
     BoxWithConstraints(
         modifier = Modifier
@@ -424,30 +435,42 @@ fun SpeedometerScreen(
     ) {
         val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
         val fontAwareHeight = maxHeight / fontScale
+        val isLandscapeLayout = maxWidth > maxHeight
+        val focusedDisplay = isSpeedFocusMode || isLandscapeLayout
         val compactLayout = fontAwareHeight < 480.dp
         val veryCompactLayout = fontAwareHeight < 340.dp
-        val showTrend = !isInPipMode && fontAwareHeight >= 300.dp
-        val showStats = !isInPipMode && fontAwareHeight >= 300.dp
+        val showTrend = !isInPipMode && !focusedDisplay && fontAwareHeight >= 300.dp
+        val showStats = !isInPipMode && !focusedDisplay && fontAwareHeight >= 300.dp
         val compactActions = !isInPipMode && fontAwareHeight < 300.dp
+        val minimumTrailHeight = if (warning == null) 650.dp else 700.dp
+        val showPositionTrail = !isInPipMode && !focusedDisplay && maxHeight >= 760.dp &&
+            fontAwareHeight >= minimumTrailHeight &&
+            state.currentPosition != null
+        val positionTrailHeight = (maxHeight * 0.20f).coerceIn(150.dp, 180.dp)
         val compactWarning = warning?.takeIf { compactLayout }
         val baselineCompact = maxHeight < 480.dp
         val baselineVeryCompact = maxHeight < 340.dp
         fun displaySize(baselineSize: Float) =
             (baselineSize * fontScale.coerceAtMost(2f) / fontScale).sp
+        val landscapeMainSize = (fontAwareHeight.value * 0.52f).coerceIn(112f, 180f)
         val baselineMainSize = when {
             isInPipMode -> 64f
+            isLandscapeLayout -> landscapeMainSize
             baselineVeryCompact -> 56f
             baselineCompact -> 72f
             else -> 120f
         }
         val baselineDecimalSize = when {
             isInPipMode -> 24f
+            isLandscapeLayout -> landscapeMainSize * 0.34f
             baselineVeryCompact -> 20f
             baselineCompact -> 24f
             else -> 40f
         }
         val baselineUnitSize = when {
-            isInPipMode || baselineVeryCompact -> 14f
+            isInPipMode -> 14f
+            isLandscapeLayout -> landscapeMainSize * 0.17f
+            baselineVeryCompact -> 14f
             baselineCompact -> 16f
             else -> 24f
         }
@@ -479,7 +502,7 @@ fun SpeedometerScreen(
                 }
             }
         } else {
-            if (!isInPipMode) {
+            if (!isInPipMode && !focusedDisplay) {
                 Column(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
@@ -594,6 +617,19 @@ fun SpeedometerScreen(
                             modifier = Modifier.padding(top = 8.dp)
                         )
                     }
+                    if (showPositionTrail) {
+                        PositionTrailMap(
+                            trail = state.positionTrail,
+                            current = requireNotNull(state.currentPosition),
+                            isStationary = displayedSpeedKmh == 0f,
+                            primaryColor = primaryColor,
+                            secondaryColor = secondaryColor,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp)
+                                .height(positionTrailHeight)
+                        )
+                    }
                 }
             }
 
@@ -630,7 +666,7 @@ fun SpeedometerScreen(
                     .align(Alignment.Center)
                     .offset(
                         y = when {
-                            compactActions -> 32.dp
+                            compactActions && !focusedDisplay -> 32.dp
                             else -> 0.dp
                         }
                     ),
@@ -645,33 +681,56 @@ fun SpeedometerScreen(
                 )
 
                 Row {
-                    // Integer Part
-                    Text(
-                        text = intPart,
-                        style = MaterialTheme.typography.displayLarge.copy(
-                            fontSize = mainSpeedSize, 
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = letterSpacing,
-                            color = primaryColor
-                        ),
+                    Row(
                         modifier = Modifier
                             .alignByBaseline()
-                            .graphicsLayer { alpha = placeholderAlpha.value }
-                    )
-                    
-                    // Decimal Part
-                    if (decPart != null) {
+                            .semantics(mergeDescendants = true) {
+                                contentDescription = "Speed display"
+                                if (!isLandscapeLayout) {
+                                    onClick(label = "Toggle focused speed display") {
+                                        currentOnSpeedDoubleTap()
+                                        true
+                                    }
+                                }
+                            }
+                            .then(
+                                if (isLandscapeLayout) {
+                                    Modifier
+                                } else {
+                                    Modifier.pointerInput(Unit) {
+                                        detectTapGestures(
+                                            onDoubleTap = { currentOnSpeedDoubleTap() }
+                                        )
+                                    }
+                                }
+                            )
+                    ) {
                         Text(
-                            text = ".$decPart",
-                            style = MaterialTheme.typography.headlineMedium.copy(
-                                fontSize = decimalSize,
+                            text = intPart,
+                            style = MaterialTheme.typography.displayLarge.copy(
+                                fontSize = mainSpeedSize,
                                 fontWeight = FontWeight.Bold,
-                                color = secondaryColor
+                                letterSpacing = letterSpacing,
+                                color = primaryColor
                             ),
                             modifier = Modifier
                                 .alignByBaseline()
-                                .padding(start = 2.dp)
+                                .graphicsLayer { alpha = placeholderAlpha.value }
                         )
+
+                        if (decPart != null) {
+                            Text(
+                                text = ".$decPart",
+                                style = MaterialTheme.typography.headlineMedium.copy(
+                                    fontSize = decimalSize,
+                                    fontWeight = FontWeight.Bold,
+                                    color = secondaryColor
+                                ),
+                                modifier = Modifier
+                                    .alignByBaseline()
+                                    .padding(start = 2.dp)
+                            )
+                        }
                     }
 
                     Spacer(modifier = Modifier.width(4.dp))
@@ -694,7 +753,7 @@ fun SpeedometerScreen(
                     )
                 }
 
-                if (!compactActions) {
+                if (!compactActions || focusedDisplay) {
                     AccuracyIndicator(
                         quality = displayedQuality,
                         speed = currentSpeed,
@@ -706,7 +765,7 @@ fun SpeedometerScreen(
                 }
             }
 
-            if (!isInPipMode) {
+            if (!isInPipMode && !focusedDisplay) {
                 // --- BOTTOM: Stats and actions ---
                 if (showStats) {
                     Column(
