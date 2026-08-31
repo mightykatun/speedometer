@@ -70,7 +70,7 @@ class SpeedometerScreenTest {
             )
         }
 
-        composeRule.onNodeWithText("speedometer v${BuildConfig.VERSION_NAME}").assertIsDisplayed()
+        composeRule.onNodeWithText("v${BuildConfig.VERSION_NAME}").assertIsDisplayed()
         composeRule.onNodeWithText("--").assertIsDisplayed()
         composeRule.onNodeWithText("km/h")
             .assertWidthIsAtLeast(48.dp)
@@ -99,6 +99,50 @@ class SpeedometerScreenTest {
             assertEquals(1, pipClicks)
             assertEquals(1, speedFocusToggles)
         }
+    }
+
+    @Test
+    fun threeDigitSpeedAndUnitFitOnNarrowPortrait() {
+        composeRule.setContent {
+            Box(modifier = Modifier.size(320.dp, 600.dp)) {
+                SpeedometerScreen(
+                    state = SpeedometerState(
+                        currentSpeedKmh = 100f,
+                        estimateQuality = EstimateQuality.TRACKING,
+                        satelliteCount = 6
+                    ),
+                    error = null,
+                    warning = null,
+                    signalMessage = null,
+                    isInPipMode = false,
+                    speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
+                    trackingMode = TrackingMode.HANDHELD,
+                    refreshRate = RefreshRate.ONE_SECOND,
+                    trackingModeEnabled = true,
+                    supportsPip = false,
+                    permissionMessage = null,
+                    permissionCanRequest = false,
+                    onSpeedUnitClick = {},
+                    onTrackingModeChange = {},
+                    onRefreshRateChange = {},
+                    onReset = {},
+                    onRetry = {},
+                    onEnterPip = {},
+                    onRequestPermission = {},
+                    onOpenSettings = {}
+                )
+            }
+        }
+
+        val speedBounds = composeRule.onNodeWithContentDescription("Speed display")
+            .fetchSemanticsNode().boundsInRoot
+        val unitBounds = composeRule.onNodeWithText("km/h").fetchSemanticsNode().boundsInRoot
+        val screenWidth = with(composeRule.density) { 320.dp.toPx() }
+        val touchTargetHeight = with(composeRule.density) { 48.dp.toPx() }
+
+        assertTrue(speedBounds.right <= unitBounds.left)
+        assertTrue(unitBounds.right <= screenWidth)
+        assertTrue(unitBounds.height <= touchTargetHeight + 1f)
     }
 
     @Test
@@ -144,7 +188,7 @@ class SpeedometerScreenTest {
         composeRule.onNodeWithText(".00").assertIsDisplayed()
         composeRule.onNodeWithText("km/h").assertIsDisplayed()
         composeRule.onNodeWithText("± 2.0 km/h").assertIsDisplayed()
-        composeRule.onNodeWithText("speedometer v${BuildConfig.VERSION_NAME}").assertDoesNotExist()
+        composeRule.onNodeWithText("v${BuildConfig.VERSION_NAME}").assertDoesNotExist()
         composeRule.onNodeWithContentDescription("North-up position trail").assertDoesNotExist()
         composeRule.onNodeWithText("top speed: ").assertDoesNotExist()
         composeRule.onNodeWithText("reset").assertDoesNotExist()
@@ -192,7 +236,7 @@ class SpeedometerScreenTest {
             .assertHeightIsAtLeast(150.dp)
             .assertIsDisplayed()
         composeRule.onNodeWithText("± 2.0 km/h").assertIsDisplayed()
-        composeRule.onNodeWithText("speedometer v${BuildConfig.VERSION_NAME}").assertDoesNotExist()
+        composeRule.onNodeWithText("v${BuildConfig.VERSION_NAME}").assertDoesNotExist()
         composeRule.onNodeWithText("top speed: ").assertDoesNotExist()
         composeRule.onNodeWithText("reset").assertDoesNotExist()
     }

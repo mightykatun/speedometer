@@ -483,6 +483,8 @@ fun SpeedometerScreen(
         SatelliteLevel.GOOD -> if (isDark) Color(0xFF69F0AE) else Color(0xFF087F23)
     }
     val currentSpeed = displayedSpeedKmh?.let(speedUnit::fromKilometersPerHour)
+    val formattedSpeed = currentSpeed?.let { "%.2f".format(Locale.US, it) }
+    val speedIntegerDigits = formattedSpeed?.substringBefore('.')?.length ?: 2
     val currentAccuracy = state.speedAccuracyKmh?.let(speedUnit::fromKilometersPerHour)
     val currentSpeedMetersPerSecond = displayedSpeedKmh?.div(KILOMETERS_PER_HOUR_PER_METER_PER_SECOND)
     val currentAccuracyMetersPerSecond = state.speedAccuracyKmh
@@ -537,9 +539,15 @@ fun SpeedometerScreen(
             baselineCompact -> 16f
             else -> 24f
         }
-        val mainSpeedSize = displaySize(baselineMainSize)
-        val decimalSize = displaySize(baselineDecimalSize)
-        val unitSize = displaySize(baselineUnitSize)
+        val portraitSpeedScale = when {
+            isInPipMode || isLandscapeLayout -> 1f
+            speedIntegerDigits >= 4 -> 0.68f
+            speedIntegerDigits >= 3 -> 0.78f
+            else -> 1f
+        }
+        val mainSpeedSize = displaySize(baselineMainSize * portraitSpeedScale)
+        val decimalSize = displaySize(baselineDecimalSize * portraitSpeedScale)
+        val unitSize = displaySize(baselineUnitSize * portraitSpeedScale)
         val letterSpacing = ((if (isInPipMode || compactLayout) -2f else -4f) / fontScale).sp
         if (permissionMessage != null) {
             PermissionRecovery(
@@ -576,6 +584,7 @@ fun SpeedometerScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(96.dp)
+                            .offset(y = (-8).dp)
                     ) {
                         Row(
                             modifier = Modifier
@@ -584,7 +593,7 @@ fun SpeedometerScreen(
                             verticalAlignment = Alignment.Bottom
                         ) {
                             Text(
-                                text = "speedometer v${BuildConfig.VERSION_NAME}",
+                                text = "v${BuildConfig.VERSION_NAME}",
                                 color = labelColor,
                                 fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                                 fontSize = 14.sp,
@@ -740,7 +749,6 @@ fun SpeedometerScreen(
                     ),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                val formattedSpeed = currentSpeed?.let { "%.2f".format(Locale.US, it) }
                 val parts = formattedSpeed?.split(".")
                 val intPart = parts?.get(0) ?: "--"
                 val decPart = parts?.getOrNull(1)
@@ -781,6 +789,8 @@ fun SpeedometerScreen(
                                 letterSpacing = letterSpacing,
                                 color = primaryColor
                             ),
+                            maxLines = 1,
+                            softWrap = false,
                             modifier = Modifier
                                 .alignByBaseline()
                                 .graphicsLayer { alpha = placeholderAlpha.value }
@@ -794,6 +804,8 @@ fun SpeedometerScreen(
                                     fontWeight = FontWeight.Bold,
                                     color = secondaryColor
                                 ),
+                                maxLines = 1,
+                                softWrap = false,
                                 modifier = Modifier
                                     .alignByBaseline()
                                     .padding(start = 2.dp)
@@ -810,6 +822,8 @@ fun SpeedometerScreen(
                             fontSize = unitSize,
                             color = tertiaryColor
                         ),
+                        maxLines = 1,
+                        softWrap = false,
                         modifier = Modifier
                             .alignByBaseline()
                             .clickable(
@@ -1116,7 +1130,7 @@ private fun LiveSpeedTrendChart(
         val animatedSpeed = animateFloatAsState(
             targetValue = targetSpeed,
             animationSpec = tween(
-                durationMillis = refreshRate.intervalMillis,
+                durationMillis = speedTrendAnimationDurationMillis(refreshRate),
                 easing = FastOutSlowInEasing
             ),
             label = "graph speed"
@@ -1286,8 +1300,12 @@ internal fun speedTrendDescription(
         .format(Locale.US, latestSpeed, speedUnit.label)
 }
 
+internal fun speedTrendAnimationDurationMillis(refreshRate: RefreshRate): Int =
+    max(MIN_TREND_ANIMATION_MILLIS, refreshRate.intervalMillis)
+
 private const val TREND_WINDOW_NANOS = 30_000_000_000L
 private const val TREND_DIRECTION_THRESHOLD_KMH = 0.5f
+private const val MIN_TREND_ANIMATION_MILLIS = 1_000
 private const val KILOMETERS_PER_HOUR_PER_METER_PER_SECOND = 3.6f
 
 @Composable

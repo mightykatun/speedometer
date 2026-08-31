@@ -16,7 +16,7 @@ The app remains a single-screen HUD with no navigation graph.
 
 ### Top Left
 
-- Shows `speedometer vX.Y.Z` as a compact gray label using the packaged app version
+- Shows `vX.Y.Z` as a compact gray label using the packaged app version
 - Shows recent satellites reported as used-in-fix by Android's GNSS status callback; stale evidence returns to zero
 - Colors the count red at zero, orange from one through five, and green at six or more; there is no separate satellite status dot
 - Satellite count is status information, not a speed-accuracy measurement
