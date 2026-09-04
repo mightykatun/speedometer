@@ -36,6 +36,9 @@ class GpxTrailEncoderTest {
             "2024-01-01T00:00:00.000Z",
             document.getElementsByTagNameNS(GPX_NAMESPACE, "time").item(0).textContent
         )
+        assertEquals(0, document.getElementsByTagNameNS("*", "extensions").length)
+        assertFalse(xml.contains("heading", ignoreCase = true))
+        assertFalse(xml.contains("course", ignoreCase = true))
         assertFalse(xml.contains("E+"))
     }
 
@@ -48,11 +51,15 @@ class GpxTrailEncoderTest {
     ) = PositionFix(
         latitudeDegrees = latitude,
         longitudeDegrees = longitude,
-        headingDegrees = null,
+        courseOverGroundDegrees = 123f,
         horizontalAccuracyMeters = 5f,
         timestampNanos = timestampNanos,
         altitudeMeters = altitude,
-        utcTimeMillis = utcTimeMillis
+        utcTimeMillis = utcTimeMillis,
+        groundSpeedMetersPerSecond = 5f,
+        groundSpeedAccuracyMetersPerSecond = 0.2f,
+        courseAccuracyDegrees = 2f,
+        groundVelocityAccepted = true
     )
 
     private companion object {

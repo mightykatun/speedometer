@@ -10,5 +10,10 @@ data class SpeedometerState(
     val speedTrend: List<SpeedTrendSample> = emptyList(),
     val currentPosition: PositionFix? = null,
     val positionTrail: List<PositionFix> = emptyList(),
-    val positionTrailSegmentStarts: List<Long> = emptyList()
+    val positionTrailSegmentStarts: List<Long> = emptyList(),
+    val portraitDisplayMode: PortraitDisplayMode = PortraitDisplayMode.NORMAL,
+    val vesselHeading: VesselHeading? = null,
+    val pinMark: RegattaMark? = null,
+    val boatMark: RegattaMark? = null,
+    val regattaMetrics: RegattaMetrics = RegattaMetrics()
 )

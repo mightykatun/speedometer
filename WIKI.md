@@ -5,7 +5,7 @@
 - **App:** Speedometer
 - **Package:** `com.mightykatun.speedometer.app`
 - **Platform:** Native Android, min SDK 24, target SDK 35
-- **Purpose:** Privacy-focused, accuracy-aware vehicle speed display
+- **Purpose:** Privacy-focused, accuracy-aware speed and sailing start-line display
 - **Network access:** None
 
 The app uses Android GNSS speed as its absolute speed source. In `gnss+imu` mode, Android's linear-acceleration and rotation-vector sensors provide bounded short-term prediction between GNSS fixes. Inertial data never replaces GNSS indefinitely.
@@ -38,6 +38,7 @@ The app remains a single-screen HUD with no navigation graph.
 - A small colored dot in Picture-in-Picture and compact `± value unit` line report one-standard-deviation uncertainty
 - The uncertainty indicator compares relative uncertainty `p = 100 * uncertainty / speed` with speed-dependent limits using `x` in m/s: green through `20/(1+x^2) + 10 - 5*atan(x/10)`, amber through `20/(1+x^2) + 20 - 10*atan(x/5)`, and red above that or when the percentage is undefined
 - The uncertainty line is hidden while acquiring the first required GNSS fix or IMU sample
+- Double-tapping the numeric speed cycles the portrait presentation through normal, focused-speed, and regatta displays without changing acquisition
 
 Estimate states:
 
@@ -47,6 +48,24 @@ Estimate states:
 | Estimated | Number available | Number is available but uncertainty or fix age is elevated |
 | Acquiring | `--` | No valid GNSS speed seed or first IMU sample yet |
 | Speed unavailable | `--` | Last defensible estimate is too old or too uncertain; reports `no signal` only when the recent satellite count is zero |
+
+### Regatta Display
+
+The portrait-only regatta display hides the two normal header rows to give a large true vessel heading the same numeral size as the existing centered speed readout. Speed remains in its normal position and is fixed to knots; `DTL | TTL` and text-only `pin | boat` controls sit below. It also hides speed uncertainty, the map, trend, altitude, normal direction labels, session maxima, reset, and float actions. Landscape and Picture-in-Picture temporarily override any portrait selection with the existing speed-only display, including its uncertainty indicator, and restore the selected portrait display afterward.
+
+- Heading is formatted as three digits plus a speed-unit-style label, such as `005 deg`; unavailable heading is `-- deg`
+- DTL is signed whole-meter perpendicular distance to the infinite start line: positive on the pre-start side and negative on the course side
+- With the committee boat at the starboard end and pin at the port end when looking up-course, the directed boat-to-pin line has pre-start on its left and course-side on its right
+- TTL is a whole non-negative number of seconds only when reliable GPS speed/course proves the vessel is closing from the pre-start side; stationary, parallel, opening, course-side, or uncertain motion displays `-- s`
+- A red point control captures a current GPS fix with at most `10 m` horizontal accuracy and turns green; failed capture leaves it unchanged and warns the user
+- A green point ignores a physical single tap and clears only on physical double-tap; each endpoint resets independently
+- Line points remain in memory across display changes, configuration recreation, background acquisition segments, and the normal session reset; they clear individually or on process death
+- The line is considered usable only when endpoint separation exceeds both the sum of reported endpoint accuracies and twice their root-sum-square vector uncertainty
+- TTL additionally requires an estimator-accepted GNSS correction, measured pre-start distance beyond two-sigma projected position/endpoint uncertainty, at least `0.2 m/s` speed, speed accuracy at most `2.0 m/s`, course accuracy at most `20°`, and inward velocity beyond two-sigma speed/course/start-line-angle uncertainty
+
+### Position Trail
+
+The existing normal north-up trail is unchanged: it labels and draws GPS movement heading while moving. True vessel heading is shown only by the regatta display and is never written to GPX.
 
 ### Bottom
 
@@ -77,21 +96,24 @@ Estimate states:
 
 `gnss+imu` does not promise tunnel navigation. Inertial propagation is limited to three seconds because consumer accelerometer bias creates rapidly growing velocity error.
 
+### Vessel Heading
+
+The vessel-heading channel is independent of tracking mode and the speed estimator. It uses Android's fused `TYPE_ROTATION_VECTOR`, falling back to `TYPE_GEOMAGNETIC_ROTATION_VECTOR` when necessary. The supported regatta mount is exact: phone portrait and vertical, screen facing aft, with device `-Z` pointing toward the bow. There is no installation-offset calibration.
+
+Rotation matrices map the bow axis into magnetic East/North. Samples with Android's unreliable status, reported heading accuracy worse than `25°`, inadequate unreported accuracy, or a horizontal bow projection below `0.25` are rejected. Accepted angles use circular exponential smoothing with a `250 ms` time constant and become unavailable after `500 ms` without a fresh sensor sample; GPS COG is never substituted.
+
+True-north correction uses the bundled degree-12 World Magnetic Model 2025 coefficients and the latest valid GPS latitude, longitude, altitude, UTC, and elapsed-realtime epoch. The model accepts dates from 2025 through 2029 and rejects locations where horizontal magnetic intensity is below `2000 nT`, so heading fails closed in navigation-blackout regions and after model expiry. Coefficients come from NOAA/NCEI's [WMM2025 release](https://doi.org/10.25921/aqfd-sd83); model documentation is the [WMM2025 technical report](https://doi.org/10.25923/prbc-s316).
+
 ## Data Pipeline
 
 ```text
 LocationManager GPS_PROVIDER ─┐
 GnssStatus satellite count ───┤
 TYPE_LINEAR_ACCELERATION ──────┼─> SpeedRepositoryImpl worker thread
-TYPE_ROTATION_VECTOR ──────────┘             │
-                                             v
-                                      SpeedEstimator
-                                             │
-                                             v
-                                      SpeedEstimate
-                                             │
-                                             v
-                              SpeedometerViewModel -> Compose
+TYPE_ROTATION_VECTOR ──────────┤             ├─> SpeedEstimator -> SpeedEstimate ─┐
+GEOMAGNETIC_ROTATION_VECTOR ───┘             └─> WMM2025 -> VesselHeading ────────┤
+                                                                                v
+                                                                SpeedometerViewModel -> Compose
 ```
 
 `SpeedRepositoryImpl` serializes location and sensor callbacks on one `HandlerThread`. A 10 Hz tick keeps stale-data state current, while accepted location callbacks may emit immediately. Starting and stopping are idempotent. Listeners remain active across configuration recreation and are removed when `onStop` represents real backgrounding.
@@ -106,13 +128,15 @@ GNSS satellite callbacks update the displayed count and timestamped satellite ev
 
 - Optional speed from `Location.hasSpeed()`
 - Optional 68-percent speed uncertainty on API 26+
-- Optional bearing and bearing uncertainty
+- Optional course over ground and course uncertainty
 - Horizontal positional accuracy, kept separate from speed uncertainty
 - Local magnetic declination
 - Temporally bounded used-in-fix evidence from the latest preceding GNSS status callback
 - `Location.elapsedRealtimeNanos` measurement time
 
 `MotionMeasurement` preserves transformed East/North/Up linear acceleration, device yaw/pitch/roll, orientation reliability, the acceleration timestamp, and the exact rotation-vector timestamp used for that transform.
+
+`PositionFix` names Android `Location.bearing` explicitly as course over ground and carries optional raw ground speed, API 26+ speed/course accuracy, and replay-aware estimator acceptance for TTL. `VesselHeading` is a separate true-north orientation value and timestamp. GPX remains standard latitude, longitude, optional elevation, and UTC time only.
 
 Both timestamps use Android's elapsed-realtime-since-boot timebase. Callback arrival time and wall-clock time are not used for filtering.
 
@@ -179,7 +203,7 @@ No watchdog injects fake zero readings.
 - The trail starts only after two accurate, physically plausible fixes, samples movement at 3 m spacing, progressively compacts at 2,048 points, and always retains its first and latest anchors
 - Trail projection is north-up, does not connect separate foreground acquisition spans, and continuously zooms to fit the complete session path; it is hidden when the viewport cannot keep it clear of the speed display
 - On Android 10+, double-tapping the visible trail exports its sampled acquisition spans as GPX track segments directly to Downloads and confirms the saved filename with a standard Toast
-- Double-tapping the numeric speed toggles a presentation-only focused display without resetting acquisition or session state; landscape always uses the enlarged focused layout
+- Double-tapping the numeric speed cycles normal, focused-speed, and regatta portrait displays without resetting acquisition or session state; landscape and Picture-in-Picture always use the enlarged speed-only layout
 - Display unit, requested tracking mode, and global refresh interval persist locally
 - A non-sensitive permission-requested marker persists only to distinguish first request from settings-only denial; permission grants and in-flight state do not persist as behavioral preferences
 - No location, motion, or session history leaves app memory unless the user explicitly exports a GPX file; the app still has no network or broad storage permission
@@ -201,6 +225,10 @@ No watchdog injects fake zero readings.
 | Course absent or stale in `gnss+imu` | Continue GNSS-only |
 | Gross phone movement in `gnss+imu` | Drop the course anchor, quarantine IMU prediction, and require a fresh course |
 | GNSS absent for more than 3 seconds | Mark speed unavailable |
+| Heading sensor absent or registration fails | Continue GPS speed normally and show heading as unavailable |
+| Heading sample unreliable or older than 500 ms | Show `-- deg`; never substitute GPS course |
+| WMM2025 outside date/altitude validity or magnetic blackout | Show `-- deg` |
+| Regatta point fix absent, stale, or worse than 10 m | Preserve the point and warn instead of capturing |
 
 ## Architecture
 
@@ -213,20 +241,25 @@ app/src/main/java/com/mightykatun/speedometer/app/
 ├── SpeedRepositoryViewModel.kt
 ├── SpeedometerViewModel.kt
 ├── data/repository/
+│   ├── HeadingTracker.kt
 │   ├── RepositoryPlatform.kt
 │   ├── SpeedRepository.kt
 │   └── SpeedRepositoryImpl.kt
 ├── di/SpeedometerViewModelFactory.kt
 └── domain/
-    ├── SpeedEstimator.kt
-    ├── SessionStatisticsTracker.kt
     ├── MonotonicClock.kt
+    ├── RegattaNavigation.kt
+    ├── SessionStatisticsTracker.kt
+    ├── SpeedEstimator.kt
+    ├── geomagnetic/WorldMagneticModel2025.kt
     ├── model/
     │   ├── EstimateQuality.kt
     │   ├── GnssMeasurement.kt
     │   ├── MaximumCandidate.kt
     │   ├── MotionMeasurement.kt
     │   ├── PositionFix.kt
+    │   ├── PortraitDisplayMode.kt
+    │   ├── RegattaState.kt
     │   ├── SessionConfig.kt
     │   ├── SessionStatistics.kt
     │   ├── SpeedEstimate.kt
@@ -234,7 +267,8 @@ app/src/main/java/com/mightykatun/speedometer/app/
     │   ├── SpeedometerState.kt
     │   ├── SpeedTrendSample.kt
     │   ├── SpeedUnit.kt
-    │   └── TrackingMode.kt
+    │   ├── TrackingMode.kt
+    │   └── VesselHeading.kt
     ├── time/AndroidElapsedRealtimeClock.kt
     └── util/SpeedConverter.kt
 ```
@@ -249,7 +283,7 @@ Automated gates:
 ./gradlew --no-build-cache clean test lint assembleDebug assembleRelease assembleDebugAndroidTest
 ```
 
-JVM tests cover repository lifecycle/retry/generation ordering, low-speed preservation, invalid measurements, uncertainty percentage bands, satellite status boundaries, outliers, reacquisition probation, replay-aware maximum candidates, GNSS isolation, GNSS + IMU prediction, trend retention, position-trail gating/compaction/projection, segmented GPX encoding, spike/vertical-shock rejection, violent-motion quarantine, orientation freshness, sensor-rate invariance, course expiry, delayed replay, duplicate inputs, history compaction, stationary evidence, safe mode transitions, and stale-data unavailability. Compose instrumentation tests cover mode, unit, reset, float, permission-recovery actions, focused portrait/landscape layouts, and position-trail accessibility/layout/export gestures.
+JVM tests cover repository lifecycle/retry/generation ordering, low-speed preservation, invalid measurements, uncertainty percentage bands, satellite status boundaries, outliers, reacquisition probation, replay-aware maximum candidates, GNSS isolation, GNSS + IMU prediction, trend retention, position-trail gating/compaction/projection, segmented GPX encoding, spike/vertical-shock rejection, violent-motion quarantine, orientation freshness, sensor-rate invariance, course expiry, delayed replay, duplicate inputs, history compaction, stationary evidence, safe mode transitions, stale-data unavailability, WMM2025 NOAA vectors, mount-axis heading, circular filtering, start-line geometry, DTL/TTL uncertainty gates, point lifetime, and portrait display cycling. Compose instrumentation tests cover mode, unit, reset, float, permission recovery, unchanged normal/focused/landscape layouts, regatta formatting and point gestures, and position-trail accessibility and export gestures.
 
 ## Field Validation
 
@@ -263,6 +297,8 @@ Automated tests prove deterministic behavior, not real-world sensor accuracy. Pr
 - Urban canyons and 1-10 second GNSS interruptions
 - Phone movement while `gnss+imu` is selected
 - Multiple mounts and materially different Android devices
+- The exact aft-facing portrait sailing mount on cardinal headings, heel/pitch angles, and low-horizontal-field regions
+- Surveyed start lines approached, paralleled, crossed, and extended beyond both endpoints at several speeds
 
 Initial acceptance targets:
 
@@ -273,5 +309,7 @@ Initial acceptance targets:
 | Constant-speed turn pulse | At most 0.5 m/s |
 | False stationary decisions during crawl corpus | Zero |
 | Delayed replay versus chronological replay | Floating-point tolerance |
+| True-heading error versus surveyed azimuth outside WMM blackout | At most the sensor-reported uncertainty plus 1° |
+| Signed DTL versus surveyed line | Within combined GNSS endpoint/current-fix uncertainty |
 
 `gnss+imu` should ship as an accuracy improvement only if it beats GNSS-only error or response latency across the complete validation corpus. Visual smoothness alone is not evidence of accuracy.

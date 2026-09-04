@@ -1,7 +1,6 @@
 package com.mightykatun.speedometer.app.data.repository
 
 import android.content.Context
-import android.hardware.GeomagneticField
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -18,6 +17,7 @@ import com.mightykatun.speedometer.app.domain.model.MotionMeasurement
 import com.mightykatun.speedometer.app.domain.model.PositionFix
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import com.mightykatun.speedometer.app.domain.model.TrackingMode
+import com.mightykatun.speedometer.app.domain.model.VesselHeading
 import java.util.concurrent.atomic.AtomicLong
 
 class SpeedRepositoryImpl private constructor(
@@ -34,16 +34,27 @@ class SpeedRepositoryImpl private constructor(
         worker: RepositoryWorker,
         mainDispatcher: RepositoryMainDispatcher,
         locationGateway: RepositoryLocationGateway,
-        motionGateway: RepositoryMotionGateway
+        motionGateway: RepositoryMotionGateway,
+        headingGateway: RepositoryHeadingGateway,
+        geomagneticModel: RepositoryGeomagneticModel
     ) : this(
         estimator,
-        RepositoryDependencies(worker, mainDispatcher, locationGateway, motionGateway)
+        RepositoryDependencies(
+            worker,
+            mainDispatcher,
+            locationGateway,
+            motionGateway,
+            headingGateway,
+            geomagneticModel
+        )
     )
 
     private val worker = dependencies.worker
     private val mainDispatcher = dependencies.mainDispatcher
     private val locationGateway = dependencies.locationGateway
     private val motionGateway = dependencies.motionGateway
+    private val headingGateway = dependencies.headingGateway
+    private val geomagneticModel = dependencies.geomagneticModel
     private val stopEpoch = AtomicLong()
     private val modeCommandSequence = AtomicLong()
 
@@ -59,6 +70,7 @@ class SpeedRepositoryImpl private constructor(
         onEstimate: (SpeedEstimate) -> Unit,
         onSatelliteCount: (Int) -> Unit,
         onPositionFix: (PositionFix) -> Unit,
+        onVesselHeading: (VesselHeading?) -> Unit,
         onGpsProviderEnabled: () -> Unit,
         onGpsRecoveryAccepted: () -> Unit,
         onPermissionRequired: () -> Unit,
@@ -70,6 +82,7 @@ class SpeedRepositoryImpl private constructor(
             onEstimate,
             onSatelliteCount,
             onPositionFix,
+            onVesselHeading,
             onGpsProviderEnabled,
             onGpsRecoveryAccepted,
             onPermissionRequired,
@@ -170,6 +183,7 @@ class SpeedRepositoryImpl private constructor(
         private val rotationMatrix = FloatArray(9)
         private val orientation = FloatArray(3)
         private val delivery = initialDelivery
+        private val headingTracker = HeadingTracker()
         private var effectiveMode = TrackingMode.HANDHELD
         private var lastRotationTimestampNanos = 0L
         private var rotationReliable = false
@@ -181,13 +195,17 @@ class SpeedRepositoryImpl private constructor(
         private var providerRecoveryBoundaryNanos = 0L
         private var acquisitionStartTimestampNanos = 0L
         private var satelliteEvidence: SatelliteEvidence? = null
+        private val deliveredPositionFixes = LinkedHashMap<Long, PositionFix>()
+        private var newestPositionEvidenceTimestampNanos = 0L
 
-        private val estimateTick = object : Runnable {
+        private val outputTick = object : Runnable {
             override fun run() {
                 if (!isCurrentStarted()) return
                 val timestampNanos = worker.elapsedRealtimeNanos()
                 expireSatelliteEvidence(timestampNanos)
+                refreshDeliveredPositionVelocityAcceptance(timestampNanos)
                 emitEstimate(estimator.snapshotAt(timestampNanos))
+                emitVesselHeading(headingTracker.snapshot(timestampNanos))
                 worker.postDelayed(this, OUTPUT_PERIOD_MILLISECONDS)
             }
         }
@@ -195,11 +213,38 @@ class SpeedRepositoryImpl private constructor(
         private val locationListener = object : LocationListener {
             override fun onLocationChanged(location: Location) {
                 if (!isCurrent() || gpsProviderDisabled) return
-                val measurement = createMeasurement(location)
+                val speedAccuracy = locationSpeedAccuracy(location)
+                val courseAccuracy = locationCourseOverGroundAccuracy(location)
+                val field = createGeomagneticField(location)
+                val defensibleDeclination = field
+                    ?.takeIf { it.hasDefensibleHeadingReference }
+                    ?.declinationDegrees
+                val measurement = createMeasurement(
+                    location,
+                    speedAccuracy,
+                    courseAccuracy,
+                    defensibleDeclination
+                )
                 val acceptedCorrectionTimestamp = estimator.ingestGnssMeasurement(measurement)
+                refreshDeliveredPositionVelocityAcceptance(location.elapsedRealtimeNanos)
                 emitEstimate(estimator.snapshotAt(location.elapsedRealtimeNanos))
                 if (location.elapsedRealtimeNanos > acquisitionStartTimestampNanos) {
-                    createPositionFix(location)?.let(::emitPositionFix)
+                    headingTracker.updateDeclination(
+                        defensibleDeclination,
+                        location.elapsedRealtimeNanos
+                    )
+                    createPositionFix(
+                        location = location,
+                        speedAccuracyMetersPerSecond = speedAccuracy,
+                        courseAccuracyDegrees = courseAccuracy,
+                        groundVelocityAccepted = estimator.isGnssMeasurementAccepted(
+                            location.elapsedRealtimeNanos
+                        )
+                    )?.let { fix ->
+                        emitPositionFix(fix)
+                        deliveredPositionFixes[fix.timestampNanos] = fix
+                        pruneDeliveredPositionFixes(fix.timestampNanos)
+                    }
                 }
                 if (providerRecoveryPending &&
                     acceptedCorrectionTimestamp != null &&
@@ -264,6 +309,18 @@ class SpeedRepositoryImpl private constructor(
             }
         }
 
+        private val headingListener = object : RepositoryHeadingListener {
+            override fun onHeadingSample(sample: HeadingSensorSample) {
+                if (isCurrentStarted() && sample.timestampNanos > acquisitionStartTimestampNanos) {
+                    headingTracker.update(sample)
+                }
+            }
+
+            override fun onHeadingUnavailable() {
+                if (isCurrentStarted()) headingTracker.clearHeading()
+            }
+        }
+
         fun start(commandId: Long, requestedMode: TrackingMode): Boolean {
             acquisitionStartTimestampNanos = worker.elapsedRealtimeNanos()
             effectiveMode = when (requestedMode) {
@@ -276,15 +333,17 @@ class SpeedRepositoryImpl private constructor(
                     TrackingMode.HANDHELD
                 }
             }
+            registerHeading()
             estimator.reset(effectiveMode)
             clearSatelliteEvidence()
             emitTrackingModeResult(commandId, requestedMode)
-            worker.postDelayed(estimateTick, OUTPUT_PERIOD_MILLISECONDS)
+            worker.postDelayed(outputTick, OUTPUT_PERIOD_MILLISECONDS)
             return true
         }
 
         fun stop() {
-            worker.removeCallbacks(estimateTick)
+            worker.removeCallbacks(outputTick)
+            unregisterHeading()
             unregisterSensors()
             if (gnssRegistered) {
                 runCatching { locationGateway.unregisterGnssStatusCallback(gnssCallback) }
@@ -299,6 +358,9 @@ class SpeedRepositoryImpl private constructor(
             providerRecoveryBoundaryNanos = 0L
             acquisitionStartTimestampNanos = 0L
             satelliteEvidence = null
+            deliveredPositionFixes.clear()
+            newestPositionEvidenceTimestampNanos = 0L
+            headingTracker.reset()
         }
 
         fun replaceCallbacks(callbacks: Callbacks) {
@@ -395,6 +457,17 @@ class SpeedRepositoryImpl private constructor(
             resetSensorState()
         }
 
+        private fun registerHeading() {
+            headingTracker.reset()
+            if (!headingGateway.supportsHeading || !isCurrent()) return
+            runCatching { headingGateway.register(headingListener) }
+        }
+
+        private fun unregisterHeading() {
+            runCatching { headingGateway.unregister() }
+            headingTracker.reset()
+        }
+
         private fun resetSensorState() {
             lastRotationTimestampNanos = 0L
             rotationReliable = false
@@ -437,30 +510,13 @@ class SpeedRepositoryImpl private constructor(
             }
         }
 
-        private fun createMeasurement(location: Location): GnssMeasurement {
+        private fun createMeasurement(
+            location: Location,
+            speedAccuracy: Float?,
+            courseAccuracy: Float?,
+            declinationDegrees: Double?
+        ): GnssMeasurement {
             val includeCourseFields = effectiveMode == TrackingMode.FIXED
-            val speedAccuracy = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-                location.hasSpeedAccuracy()
-            ) {
-                location.speedAccuracyMetersPerSecond
-            } else null
-            val bearingAccuracy = if (includeCourseFields &&
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-                location.hasBearingAccuracy()
-            ) {
-                location.bearingAccuracyDegrees
-            } else null
-            val declination = if (includeCourseFields) {
-                val altitude = if (location.hasAltitude()) location.altitude.toFloat() else 0f
-                runCatching {
-                    GeomagneticField(
-                        location.latitude.toFloat(),
-                        location.longitude.toFloat(),
-                        altitude,
-                        location.time
-                    ).declination.toDouble()
-                }.getOrNull()
-            } else null
             val coherentSatelliteCount = satelliteEvidence?.takeIf { evidence ->
                 evidence.observedAtElapsedRealtimeNanos <= location.elapsedRealtimeNanos &&
                     location.elapsedRealtimeNanos - evidence.observedAtElapsedRealtimeNanos <=
@@ -470,11 +526,42 @@ class SpeedRepositoryImpl private constructor(
             return createGnssMeasurement(
                 location = location,
                 satelliteCount = coherentSatelliteCount,
-                magneticDeclinationDegrees = declination,
+                magneticDeclinationDegrees = declinationDegrees,
                 speedAccuracyMetersPerSecond = speedAccuracy,
-                bearingAccuracyDegrees = bearingAccuracy,
+                courseOverGroundAccuracyDegrees = courseAccuracy,
                 includeCourseFields = includeCourseFields
             )
+        }
+
+        private fun createGeomagneticField(location: Location) = runCatching {
+            geomagneticModel.evaluate(
+                latitudeDegrees = location.latitude,
+                longitudeDegrees = location.longitude,
+                altitudeMeters = location.altitude.takeIf { location.hasAltitude() && it.isFinite() } ?: 0.0,
+                utcTimeMillis = location.time
+            )
+        }.getOrNull()
+
+        private fun refreshDeliveredPositionVelocityAcceptance(timestampNanos: Long) {
+            pruneDeliveredPositionFixes(timestampNanos)
+            val replacements = deliveredPositionFixes.mapNotNull { (timestamp, previous) ->
+                val accepted = estimator.isGnssMeasurementAccepted(timestamp)
+                previous.copy(groundVelocityAccepted = accepted)
+                    .takeIf { accepted != previous.groundVelocityAccepted }
+            }
+            replacements.forEach { replacement ->
+                deliveredPositionFixes[replacement.timestampNanos] = replacement
+                emitPositionFix(replacement)
+            }
+        }
+
+        private fun pruneDeliveredPositionFixes(timestampNanos: Long) {
+            newestPositionEvidenceTimestampNanos = maxOf(
+                newestPositionEvidenceTimestampNanos,
+                timestampNanos
+            )
+            val cutoff = newestPositionEvidenceTimestampNanos - POSITION_ACCEPTANCE_HISTORY_NANOS
+            deliveredPositionFixes.entries.removeAll { it.key < cutoff }
         }
 
         private fun updateRotation(event: SensorEvent) {
@@ -527,6 +614,13 @@ class SpeedRepositoryImpl private constructor(
             }
         }
 
+        private fun emitVesselHeading(heading: VesselHeading?) {
+            val target = delivery
+            mainDispatcher.post {
+                if (target.valid) target.callbacks.onVesselHeading(heading)
+            }
+        }
+
         private fun emitGpsProviderEnabled() {
             val target = delivery
             mainDispatcher.post {
@@ -573,6 +667,7 @@ class SpeedRepositoryImpl private constructor(
         val onEstimate: (SpeedEstimate) -> Unit,
         val onSatelliteCount: (Int) -> Unit,
         val onPositionFix: (PositionFix) -> Unit,
+        val onVesselHeading: (VesselHeading?) -> Unit,
         val onGpsProviderEnabled: () -> Unit,
         val onGpsRecoveryAccepted: () -> Unit,
         val onPermissionRequired: () -> Unit,
@@ -619,6 +714,7 @@ class SpeedRepositoryImpl private constructor(
         const val OUTPUT_PERIOD_MILLISECONDS = 100L
         const val MAX_ORIENTATION_AGE_NANOS = 100_000_000L
         const val MAX_SATELLITE_EVIDENCE_AGE_NANOS = 2_000_000_000L
+        const val POSITION_ACCEPTANCE_HISTORY_NANOS = 3_000_000_000L
         val MAX_HEADING_ACCURACY_RADIANS: Double = Math.toRadians(25.0)
     }
 }
@@ -628,17 +724,17 @@ internal fun createGnssMeasurement(
     satelliteCount: Int,
     magneticDeclinationDegrees: Double?,
     speedAccuracyMetersPerSecond: Float?,
-    bearingAccuracyDegrees: Float?,
+    courseOverGroundAccuracyDegrees: Float?,
     includeCourseFields: Boolean
 ): GnssMeasurement {
     val speed = location.speed.toDouble().takeIf {
         location.hasSpeed() && it.isFinite() && it >= 0.0
     }
     val speedAccuracy = speedAccuracyMetersPerSecond?.toDouble()?.takeIf { it.isFinite() && it >= 0.0 }
-    val bearing = location.bearing.toDouble().takeIf {
+    val courseOverGround = location.bearing.toDouble().takeIf {
         includeCourseFields && location.hasBearing() && it.isFinite()
     }
-    val bearingAccuracy = bearingAccuracyDegrees?.toDouble()?.takeIf {
+    val courseAccuracy = courseOverGroundAccuracyDegrees?.toDouble()?.takeIf {
         includeCourseFields && it.isFinite() && it >= 0.0
     }
     val horizontalAccuracy = location.accuracy.toDouble().takeIf {
@@ -647,8 +743,8 @@ internal fun createGnssMeasurement(
     return GnssMeasurement(
         speedMetersPerSecond = speed,
         speedAccuracyMetersPerSecond = speedAccuracy,
-        bearingDegrees = bearing,
-        bearingAccuracyDegrees = bearingAccuracy,
+        courseOverGroundDegrees = courseOverGround,
+        courseOverGroundAccuracyDegrees = courseAccuracy,
         horizontalAccuracyMeters = horizontalAccuracy,
         magneticDeclinationDegrees = magneticDeclinationDegrees.takeIf { includeCourseFields },
         satelliteCount = satelliteCount,
@@ -656,26 +752,56 @@ internal fun createGnssMeasurement(
     )
 }
 
-internal fun createPositionFix(location: Location): PositionFix? {
+internal fun createPositionFix(
+    location: Location,
+    speedAccuracyMetersPerSecond: Float? = null,
+    courseAccuracyDegrees: Float? = null,
+    groundVelocityAccepted: Boolean = false
+): PositionFix? {
     val latitude = location.latitude.takeIf { it.isFinite() && it in -90.0..90.0 } ?: return null
     val longitude = location.longitude.takeIf { it.isFinite() && it in -180.0..180.0 } ?: return null
     val timestampNanos = location.elapsedRealtimeNanos.takeIf { it > 0L } ?: return null
-    val heading = location.bearing.takeIf { location.hasBearing() && it.isFinite() }
+    val courseOverGround = location.bearing.takeIf { location.hasBearing() && it.isFinite() }
         ?.let { ((it % 360f) + 360f) % 360f }
     val horizontalAccuracy = location.accuracy.takeIf {
         location.hasAccuracy() && it.isFinite() && it >= 0f
     } ?: return null
     val altitude = location.altitude.takeIf { location.hasAltitude() && it.isFinite() }
+    val speed = location.speed.takeIf { location.hasSpeed() && it.isFinite() && it >= 0f }
+    val speedAccuracy = speedAccuracyMetersPerSecond?.takeIf {
+        it.isFinite() && it >= 0f
+    }
+    val courseAccuracy = courseAccuracyDegrees?.takeIf {
+        it.isFinite() && it >= 0f
+    }
     return PositionFix(
         latitudeDegrees = latitude,
         longitudeDegrees = longitude,
-        headingDegrees = heading,
+        courseOverGroundDegrees = courseOverGround,
         horizontalAccuracyMeters = horizontalAccuracy,
         timestampNanos = timestampNanos,
         altitudeMeters = altitude,
-        utcTimeMillis = location.time.takeIf { it > 0L }
+        utcTimeMillis = location.time.takeIf { it > 0L },
+        groundSpeedMetersPerSecond = speed,
+        groundSpeedAccuracyMetersPerSecond = speedAccuracy,
+        courseAccuracyDegrees = courseAccuracy,
+        groundVelocityAccepted = groundVelocityAccepted
     )
 }
+
+private fun locationSpeedAccuracy(location: Location): Float? =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && location.hasSpeedAccuracy()) {
+        location.speedAccuracyMetersPerSecond
+    } else {
+        null
+    }
+
+private fun locationCourseOverGroundAccuracy(location: Location): Float? =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && location.hasBearingAccuracy()) {
+        location.bearingAccuracyDegrees
+    } else {
+        null
+    }
 
 internal fun createMotionMeasurement(
     rotationMatrix: FloatArray,

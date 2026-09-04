@@ -37,12 +37,14 @@ class SpeedEstimatorTest {
         val estimator = SpeedEstimator()
         estimator.ingestGnssMeasurement(gnss(10.0, 0.1, seconds(10)))
         assertNull(estimator.ingestGnssMeasurement(gnss(20.0, 0.1, seconds(12))))
+        assertFalse(estimator.isGnssMeasurementAccepted(seconds(12)))
 
         val acceptedTimestamp = estimator.ingestGnssMeasurement(
             gnss(20.0, 0.1, seconds(11))
         )
 
         assertEquals(seconds(12), acceptedTimestamp)
+        assertTrue(estimator.isGnssMeasurementAccepted(seconds(12)))
     }
 
     @Test
@@ -178,7 +180,7 @@ class SpeedEstimatorTest {
         val estimator = SpeedEstimator()
         estimator.setTrackingMode(TrackingMode.FIXED)
         estimator.onMotionMeasurement(motion(0.0, seconds(1)))
-        estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1) + 10_000_000L, bearing = 0.0))
+        estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1) + 10_000_000L, course = 0.0))
 
         estimator.onMotionMeasurement(motion(1.0, seconds(1) + 110_000_000L))
         estimator.onMotionMeasurement(motion(1.0, seconds(1) + 210_000_000L))
@@ -195,7 +197,7 @@ class SpeedEstimatorTest {
             val timestamp = seconds(1) + step * 100_000_000L
             estimator.onMotionMeasurement(motion(0.2, timestamp))
             if (step % 10 == 0) {
-                estimator.onGnssMeasurement(gnss(10.0, 0.1, timestamp, bearing = 0.0))
+                estimator.onGnssMeasurement(gnss(10.0, 0.1, timestamp, course = 0.0))
             }
         }
 
@@ -212,7 +214,7 @@ class SpeedEstimatorTest {
         val estimator = SpeedEstimator()
         estimator.setTrackingMode(TrackingMode.FIXED)
         estimator.onMotionMeasurement(motion(0.0, seconds(1)))
-        estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1), bearing = 0.0))
+        estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1), course = 0.0))
 
         estimator.onMotionMeasurement(motion(5.0, seconds(5)))
         val estimate = estimator.estimateAt(seconds(5))
@@ -224,7 +226,7 @@ class SpeedEstimatorTest {
     @Test
     fun `fixed mode invalidates stale course from an unusable fix`() {
         val estimator = fixedEstimatorWithSeed()
-        estimator.onGnssMeasurement(gnss(1.0, 0.1, seconds(2), bearing = null))
+        estimator.onGnssMeasurement(gnss(1.0, 0.1, seconds(2), course = null))
 
         estimator.onMotionMeasurement(motion(-10.0, seconds(2) + 100_000_000L))
         val estimate = estimator.snapshotAt(seconds(2) + 100_000_000L)
@@ -262,13 +264,13 @@ class SpeedEstimatorTest {
     fun `delayed GNSS replay matches chronological processing`() {
         val chronological = fixedEstimatorWithSeed()
         chronological.onMotionMeasurement(motion(1.0, seconds(1) + 100_000_000L))
-        chronological.onGnssMeasurement(gnss(10.1, 0.2, seconds(1) + 150_000_000L, bearing = 0.0))
+        chronological.onGnssMeasurement(gnss(10.1, 0.2, seconds(1) + 150_000_000L, course = 0.0))
         chronological.onMotionMeasurement(motion(1.0, seconds(1) + 200_000_000L))
 
         val delayed = fixedEstimatorWithSeed()
         delayed.onMotionMeasurement(motion(1.0, seconds(1) + 100_000_000L))
         delayed.onMotionMeasurement(motion(1.0, seconds(1) + 200_000_000L))
-        delayed.onGnssMeasurement(gnss(10.1, 0.2, seconds(1) + 150_000_000L, bearing = 0.0))
+        delayed.onGnssMeasurement(gnss(10.1, 0.2, seconds(1) + 150_000_000L, course = 0.0))
 
         assertEquals(
             chronological.estimateAt(seconds(1) + 200_000_000L).speedMetersPerSecond!!,
@@ -283,8 +285,10 @@ class SpeedEstimatorTest {
         estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1)))
         estimator.onGnssMeasurement(gnss(20.0, 0.1, seconds(3)))
         val acceptedBeforeReplay = estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(4)))
+        assertTrue(estimator.isGnssMeasurementAccepted(seconds(4)))
 
         val replayed = estimator.onGnssMeasurement(gnss(20.0, 0.1, seconds(2)))
+        assertFalse(estimator.isGnssMeasurementAccepted(seconds(4)))
 
         assertTrue(
             acceptedBeforeReplay.maximumCandidateChanges.any {
@@ -477,7 +481,7 @@ class SpeedEstimatorTest {
         val estimator = fixedEstimatorWithSeed()
         estimator.onMotionMeasurement(motion(20.0, seconds(1) + 20_000_000L))
         estimator.onMotionMeasurement(motion(0.0, seconds(1) + 100_000_000L))
-        estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1) + 110_000_000L, bearing = 0.0))
+        estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1) + 110_000_000L, course = 0.0))
         estimator.onMotionMeasurement(motion(2.0, seconds(1) + 120_000_000L))
         estimator.onMotionMeasurement(motion(2.0, seconds(1) + 140_000_000L))
         estimator.onMotionMeasurement(motion(2.0, seconds(1) + 160_000_000L))
@@ -497,7 +501,7 @@ class SpeedEstimatorTest {
         val estimator = SpeedEstimator()
         estimator.setTrackingMode(TrackingMode.FIXED)
         estimator.onMotionMeasurement(motion(0.0, seconds(1)))
-        estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1) + 200_000_000L, bearing = 0.0))
+        estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1) + 200_000_000L, course = 0.0))
         estimator.onMotionMeasurement(motion(2.0, seconds(1) + 220_000_000L))
         estimator.onMotionMeasurement(motion(2.0, seconds(1) + 240_000_000L))
         estimator.onMotionMeasurement(motion(2.0, seconds(1) + 260_000_000L))
@@ -517,7 +521,7 @@ class SpeedEstimatorTest {
                 orientationTimestampNanos = seconds(1)
             )
         )
-        estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1) + 50_000_000L, bearing = 0.0))
+        estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1) + 50_000_000L, course = 0.0))
         estimator.onMotionMeasurement(motion(1.0, seconds(1) + 110_000_000L))
         estimator.onMotionMeasurement(motion(1.0, seconds(1) + 130_000_000L))
         val estimate = estimator.snapshotAt(seconds(1) + 130_000_000L)
@@ -530,7 +534,7 @@ class SpeedEstimatorTest {
         val estimator = SpeedEstimator()
         estimator.setTrackingMode(TrackingMode.FIXED)
         estimator.onMotionMeasurement(motion(0.0, seconds(1), orientationReliable = false))
-        estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1) + 10_000_000L, bearing = 0.0))
+        estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1) + 10_000_000L, course = 0.0))
         estimator.onMotionMeasurement(motion(2.0, seconds(1) + 30_000_000L))
         estimator.onMotionMeasurement(motion(2.0, seconds(1) + 50_000_000L))
         estimator.onMotionMeasurement(motion(2.0, seconds(1) + 70_000_000L))
@@ -601,7 +605,7 @@ class SpeedEstimatorTest {
         val estimator = fixedEstimatorWithSeed()
         for (second in 2L..6L) {
             estimator.onMotionMeasurement(motion(0.0, seconds(second) - 10_000_000L))
-            estimator.onGnssMeasurement(gnss(0.0, 0.1, seconds(second), bearing = null))
+            estimator.onGnssMeasurement(gnss(0.0, 0.1, seconds(second), course = null))
         }
 
         val stopped = estimator.estimateAt(seconds(6))
@@ -615,7 +619,7 @@ class SpeedEstimatorTest {
     fun `motion older than retained replay history is ignored`() {
         val estimator = fixedEstimatorWithSeed()
         for (second in 2L..8L) {
-            estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(second), bearing = 0.0))
+            estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(second), course = 0.0))
         }
         val before = estimator.estimateAt(seconds(8))
 
@@ -633,7 +637,7 @@ class SpeedEstimatorTest {
             val timestamp = seconds(1) + step * 20_000_000L
             estimator.ingestMotionMeasurement(motion(0.0, timestamp))
             if (step % 50 == 0) {
-                estimator.ingestGnssMeasurement(gnss(10.0, 0.1, timestamp, bearing = 0.0))
+                estimator.ingestGnssMeasurement(gnss(10.0, 0.1, timestamp, course = 0.0))
             }
         }
         val beforeOldDuplicate = estimator.snapshotAt(seconds(21))
@@ -673,7 +677,7 @@ class SpeedEstimatorTest {
     private fun fixedEstimatorWithSeed(): SpeedEstimator = SpeedEstimator().also { estimator ->
         estimator.setTrackingMode(TrackingMode.FIXED)
         estimator.onMotionMeasurement(motion(0.0, seconds(1) - 10_000_000L))
-        estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1), bearing = 0.0))
+        estimator.onGnssMeasurement(gnss(10.0, 0.1, seconds(1), course = 0.0))
     }
 
     private fun gnss(
@@ -681,14 +685,14 @@ class SpeedEstimatorTest {
         sigma: Double?,
         time: Long,
         horizontalAccuracy: Double = 5.0,
-        bearing: Double? = null
+        course: Double? = null
     ) = GnssMeasurement(
         speedMetersPerSecond = speed,
         speedAccuracyMetersPerSecond = sigma,
-        bearingDegrees = bearing,
-        bearingAccuracyDegrees = bearing?.let { 5.0 },
+        courseOverGroundDegrees = course,
+        courseOverGroundAccuracyDegrees = course?.let { 5.0 },
         horizontalAccuracyMeters = horizontalAccuracy,
-        magneticDeclinationDegrees = bearing?.let { 0.0 },
+        magneticDeclinationDegrees = course?.let { 0.0 },
         satelliteCount = 6,
         timestampNanos = time
     )

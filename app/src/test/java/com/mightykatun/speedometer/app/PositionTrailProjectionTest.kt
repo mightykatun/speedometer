@@ -152,7 +152,7 @@ class PositionTrailProjectionTest {
     ) = PositionFix(
         latitudeDegrees = latitude,
         longitudeDegrees = longitude,
-        headingDegrees = null,
+        courseOverGroundDegrees = null,
         horizontalAccuracyMeters = 5f,
         timestampNanos = timestampNanos
     )

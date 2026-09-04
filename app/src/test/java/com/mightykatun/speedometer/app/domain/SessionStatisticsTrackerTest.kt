@@ -262,8 +262,8 @@ class SessionStatisticsTrackerTest {
     private fun gnss(speed: Double, timestamp: Long) = GnssMeasurement(
         speedMetersPerSecond = speed,
         speedAccuracyMetersPerSecond = 0.1,
-        bearingDegrees = null,
-        bearingAccuracyDegrees = null,
+        courseOverGroundDegrees = null,
+        courseOverGroundAccuracyDegrees = null,
         horizontalAccuracyMeters = 1.0,
         magneticDeclinationDegrees = null,
         satelliteCount = 5,

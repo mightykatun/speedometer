@@ -6,12 +6,16 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import com.mightykatun.speedometer.app.data.repository.RepositoryError
 import com.mightykatun.speedometer.app.domain.SessionStatisticsTracker
+import com.mightykatun.speedometer.app.domain.calculateRegattaMetrics
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
 import com.mightykatun.speedometer.app.domain.model.PositionFix
+import com.mightykatun.speedometer.app.domain.model.PortraitDisplayMode
 import com.mightykatun.speedometer.app.domain.model.RefreshRate
+import com.mightykatun.speedometer.app.domain.model.RegattaMark
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import com.mightykatun.speedometer.app.domain.model.SpeedometerState
 import com.mightykatun.speedometer.app.domain.model.SpeedTrendSample
+import com.mightykatun.speedometer.app.domain.model.VesselHeading
 import kotlin.math.cos
 import kotlin.math.hypot
 
@@ -31,9 +35,12 @@ class SpeedometerViewModel(
     private val positionTrail = ArrayList<PositionFix>()
     private val positionTrailSegmentStarts = ArrayList<Long>()
     private var latestPositionFix: PositionFix? = null
+    private var latestNavigationFix: PositionFix? = null
     private var pendingInitialPositionFix: PositionFix? = null
     private var newPositionSegmentPending = false
     private var lastPositionPresentationTimestampNanos = 0L
+    private var latestVesselHeading: VesselHeading? = null
+    private var lastHeadingPresentationTimestampNanos = 0L
 
     var state by mutableStateOf(SpeedometerState())
         private set
@@ -48,6 +55,7 @@ class SpeedometerViewModel(
         private set
 
     fun onSpeedEstimateReceived(estimate: SpeedEstimate) {
+        expireNavigationFix(estimate.timestampNanos)
         val stats = sessionTracker.updateSpeed(estimate)
         latestMaxSpeedKmh = stats.maxSpeedKmh
         latestSatelliteCount = stats.currentSatellites
@@ -86,16 +94,25 @@ class SpeedometerViewModel(
         if (previous == null) {
             val pending = pendingInitialPositionFix
             when {
-                pending == null -> pendingInitialPositionFix = fix
+                pending == null -> {
+                    pendingInitialPositionFix = fix
+                    publishInitialNavigationFix(fix)
+                }
                 fix.timestampNanos < pending.timestampNanos -> Unit
-                fix.timestampNanos == pending.timestampNanos -> pendingInitialPositionFix = fix
+                fix.timestampNanos == pending.timestampNanos -> {
+                    pendingInitialPositionFix = fix
+                    publishInitialNavigationFix(fix)
+                }
                 isPlausiblePositionTransition(pending, fix) -> {
                     pendingInitialPositionFix = null
                     recordPositionFix(pending)
                     recordPositionFix(fix)
                     publishPositionIfDue()
                 }
-                else -> pendingInitialPositionFix = fix
+                else -> {
+                    pendingInitialPositionFix = fix
+                    publishInitialNavigationFix(fix)
+                }
             }
             return
         }
@@ -107,11 +124,41 @@ class SpeedometerViewModel(
         publishPositionIfDue(force = replacesLatest)
     }
 
+    fun onVesselHeadingReceived(heading: VesselHeading?) {
+        if (!sessionActive) return
+        if (heading == null) {
+            latestVesselHeading = null
+            lastHeadingPresentationTimestampNanos = 0L
+            if (state.vesselHeading != null) state = state.copy(vesselHeading = null)
+            return
+        }
+        if (latestVesselHeading?.timestampNanos?.let { heading.timestampNanos < it } == true) return
+        latestVesselHeading = heading
+        publishHeadingIfDue()
+    }
+
+    fun cyclePortraitDisplayMode() {
+        state = state.copy(portraitDisplayMode = state.portraitDisplayMode.next())
+    }
+
+    fun capturePinMark(): Boolean = captureRegattaMark(isPin = true)
+
+    fun captureBoatMark(): Boolean = captureRegattaMark(isPin = false)
+
+    fun clearPinMark() {
+        state = state.copy(pinMark = null, regattaMetrics = calculateMetrics(pinMark = null))
+    }
+
+    fun clearBoatMark() {
+        state = state.copy(boatMark = null, regattaMetrics = calculateMetrics(boatMark = null))
+    }
+
     fun onRefreshRateChanged(refreshRate: RefreshRate) {
         if (this.refreshRate == refreshRate) return
         this.refreshRate = refreshRate
         publishPresentationIfDue(force = true)
         publishPositionIfDue(force = true)
+        publishHeadingIfDue(force = true)
     }
 
     internal fun positionTrailSnapshot(): PositionTrailSnapshot {
@@ -152,7 +199,9 @@ class SpeedometerViewModel(
             speedTrend = emptyList(),
             currentPosition = null,
             positionTrail = positionTrail.toList(),
-            positionTrailSegmentStarts = positionTrailSegmentStarts.toList()
+            positionTrailSegmentStarts = positionTrailSegmentStarts.toList(),
+            vesselHeading = null,
+            regattaMetrics = calculateRegattaMetrics(state.boatMark, state.pinMark, null)
         )
         errorMessage = null
         warningMessage = null
@@ -163,14 +212,21 @@ class SpeedometerViewModel(
         lastPresentationTimestampNanos = 0L
         newPositionSegmentPending = positionTrail.isNotEmpty()
         latestPositionFix = null
+        latestNavigationFix = null
         pendingInitialPositionFix = null
         lastPositionPresentationTimestampNanos = 0L
+        latestVesselHeading = null
+        lastHeadingPresentationTimestampNanos = 0L
     }
 
     fun onSessionReset() {
         sessionActive = false
         sessionTracker.reset()
-        state = SpeedometerState()
+        state = SpeedometerState(
+            portraitDisplayMode = state.portraitDisplayMode,
+            pinMark = state.pinMark,
+            boatMark = state.boatMark
+        )
         errorMessage = null
         warningMessage = null
         signalMessage = null
@@ -184,9 +240,12 @@ class SpeedometerViewModel(
         positionTrail.clear()
         positionTrailSegmentStarts.clear()
         latestPositionFix = null
+        latestNavigationFix = null
         pendingInitialPositionFix = null
         newPositionSegmentPending = false
         lastPositionPresentationTimestampNanos = 0L
+        latestVesselHeading = null
+        lastHeadingPresentationTimestampNanos = 0L
     }
 
     fun onRepositoryError(error: RepositoryError) {
@@ -202,14 +261,18 @@ class SpeedometerViewModel(
                     currentSpeedKmh = null,
                     speedAccuracyKmh = null,
                     estimateQuality = EstimateQuality.UNAVAILABLE,
-                    satelliteCount = 0
+                    satelliteCount = 0,
+                    regattaMetrics = calculateRegattaMetrics(state.boatMark, state.pinMark, null)
                 )
+                latestNavigationFix = null
             }
             RepositoryError.RETRYABLE_STARTUP_FAILURE -> {
                 gpsErrorActive = false
                 waitingForFreshGnss = false
                 signalMessage = null
                 errorMessage = GPS_STARTUP_ERROR_MESSAGE
+                latestVesselHeading = null
+                state = state.copy(vesselHeading = null)
             }
         }
     }
@@ -281,7 +344,8 @@ class SpeedometerViewModel(
         state = state.copy(
             currentPosition = latest,
             positionTrail = positionTrail.toList(),
-            positionTrailSegmentStarts = positionTrailSegmentStarts.toList()
+            positionTrailSegmentStarts = positionTrailSegmentStarts.toList(),
+            regattaMetrics = calculateMetrics()
         )
         lastPositionPresentationTimestampNanos = maxOf(
             lastPositionPresentationTimestampNanos,
@@ -318,6 +382,7 @@ class SpeedometerViewModel(
 
     private fun recordPositionFix(fix: PositionFix) {
         latestPositionFix = fix
+        latestNavigationFix = fix
         when {
             newPositionSegmentPending -> {
                 newPositionSegmentPending = false
@@ -336,6 +401,68 @@ class SpeedometerViewModel(
         }
     }
 
+    private fun publishHeadingIfDue(force: Boolean = false) {
+        val latest = latestVesselHeading ?: return
+        val refreshDue = lastHeadingPresentationTimestampNanos == 0L ||
+            latest.timestampNanos - lastHeadingPresentationTimestampNanos >= refreshRate.intervalNanos
+        if (!force && !refreshDue) return
+        state = state.copy(vesselHeading = latest)
+        lastHeadingPresentationTimestampNanos = maxOf(
+            lastHeadingPresentationTimestampNanos,
+            latest.timestampNanos
+        )
+    }
+
+    private fun publishInitialNavigationFix(fix: PositionFix) {
+        latestNavigationFix = fix
+        val metrics = calculateMetrics()
+        if (metrics != state.regattaMetrics) state = state.copy(regattaMetrics = metrics)
+    }
+
+    private fun captureRegattaMark(isPin: Boolean): Boolean {
+        val fix = latestNavigationFix?.takeIf { current ->
+            current.horizontalAccuracyMeters <= MAX_REGATTA_MARK_ACCURACY_METERS &&
+                latestPresentation?.timestampNanos?.let { now ->
+                    now < current.timestampNanos ||
+                        now - current.timestampNanos <= MAX_REGATTA_FIX_AGE_NANOS
+                } != false
+        } ?: return false
+        val mark = RegattaMark(
+            latitudeDegrees = fix.latitudeDegrees,
+            longitudeDegrees = fix.longitudeDegrees,
+            horizontalAccuracyMeters = fix.horizontalAccuracyMeters
+        )
+        val pinMark = if (isPin) mark else state.pinMark
+        val boatMark = if (isPin) state.boatMark else mark
+        state = state.copy(
+            pinMark = pinMark,
+            boatMark = boatMark,
+            regattaMetrics = calculateRegattaMetrics(boatMark, pinMark, latestNavigationFix)
+        )
+        return true
+    }
+
+    private fun calculateMetrics(
+        pinMark: RegattaMark? = state.pinMark,
+        boatMark: RegattaMark? = state.boatMark
+    ) = calculateRegattaMetrics(boatMark, pinMark, latestNavigationFix)
+
+    private fun expireNavigationFix(timestampNanos: Long) {
+        val fix = latestNavigationFix ?: return
+        if (timestampNanos >= fix.timestampNanos &&
+            timestampNanos - fix.timestampNanos > MAX_REGATTA_FIX_AGE_NANOS
+        ) {
+            latestNavigationFix = null
+            if (state.regattaMetrics.signedDistanceToLineMeters != null ||
+                state.regattaMetrics.timeToLineSeconds != null
+            ) {
+                state = state.copy(
+                    regattaMetrics = calculateRegattaMetrics(state.boatMark, state.pinMark, null)
+                )
+            }
+        }
+    }
+
     private fun isPlausiblePositionTransition(first: PositionFix, second: PositionFix): Boolean {
         val elapsedSeconds = (second.timestampNanos - first.timestampNanos) / 1_000_000_000.0
         if (elapsedSeconds < 0.0) return false
@@ -349,7 +476,7 @@ class SpeedometerViewModel(
         timestampNanos > 0L &&
             latitudeDegrees.isFinite() && latitudeDegrees in -90.0..90.0 &&
             longitudeDegrees.isFinite() && longitudeDegrees in -180.0..180.0 &&
-            headingDegrees?.isFinite() != false &&
+            courseOverGroundDegrees?.isFinite() != false &&
             altitudeMeters?.isFinite() != false &&
             horizontalAccuracyMeters.isFinite() &&
             horizontalAccuracyMeters in 0f..MAX_TRAIL_ACCURACY_METERS
@@ -400,6 +527,8 @@ class SpeedometerViewModel(
         const val MIN_TRAIL_STEP_METERS = 3.0
         const val MAX_TRAIL_ACCURACY_METERS = 100f
         const val MAX_TRAIL_SPEED_METERS_PER_SECOND = 400.0
+        const val MAX_REGATTA_MARK_ACCURACY_METERS = 10f
+        const val MAX_REGATTA_FIX_AGE_NANOS = 3_000_000_000L
         const val EARTH_RADIUS_METERS = 6_371_000.0
     }
 }

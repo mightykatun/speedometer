@@ -78,8 +78,8 @@ class SpeedEstimator(
         var courseRadians: Double? = null,
         var courseAnchorYawRadians: Double? = null,
         var courseAnchorNanos: Long = 0L,
-        var legacyBearingDegrees: Double? = null,
-        var stableLegacyBearingCount: Int = 0,
+        var legacyCourseOverGroundDegrees: Double? = null,
+        var stableLegacyCourseCount: Int = 0,
         var outlierCount: Int = 0,
         var outlierMeanSpeed: Double = 0.0,
         var outlierLastNanos: Long = 0L,
@@ -165,6 +165,18 @@ class SpeedEstimator(
         }
 
         return insertAndProcess(Input.Gnss(measurement))
+    }
+
+    internal fun isGnssMeasurementAccepted(timestampNanos: Long): Boolean {
+        for (index in history.lastIndex downTo historyStart) {
+            val entry = history[index]
+            val gnss = entry.input as? Input.Gnss ?: continue
+            if (gnss.timestampNanos == timestampNanos) {
+                return entry.stateAfter.lastAcceptedGnssNanos == timestampNanos
+            }
+            if (gnss.timestampNanos < timestampNanos) return false
+        }
+        return false
     }
 
     fun ingestMotionMeasurement(measurement: MotionMeasurement) {
@@ -523,33 +535,34 @@ class SpeedEstimator(
         val reliableYaw = state.lastReliableYawRadians ?: return clearCourse()
         val orientationAge = measurement.timestampNanos - state.lastReliableOrientationNanos
         if (orientationAge !in 0..config.maximumOrientationAgeNanos) return clearCourse()
-        val bearing = measurement.bearingDegrees ?: return clearCourse()
+        val courseOverGround = measurement.courseOverGroundDegrees ?: return clearCourse()
         val horizontalAccuracy = measurement.horizontalAccuracyMeters ?: return clearCourse()
         val declination = measurement.magneticDeclinationDegrees ?: return clearCourse()
-        val bearingAccuracy = measurement.bearingAccuracyDegrees
+        val courseAccuracy = measurement.courseOverGroundAccuracyDegrees
 
-        val acceptable = if (bearingAccuracy != null) {
+        val acceptable = if (courseAccuracy != null) {
             speed >= config.minimumCourseSpeedMetersPerSecond &&
                 horizontalAccuracy <= config.maximumCourseHorizontalAccuracyMeters &&
-                bearingAccuracy <= config.maximumBearingAccuracyDegrees
+                courseAccuracy <= config.maximumCourseOverGroundAccuracyDegrees
         } else {
-            val previous = state.legacyBearingDegrees
-            state.legacyBearingDegrees = bearing
-            state.stableLegacyBearingCount = if (previous != null &&
-                abs(angleDeltaDegrees(bearing, previous)) <= config.maximumLegacyBearingDeltaDegrees
-            ) state.stableLegacyBearingCount + 1 else 1
+            val previous = state.legacyCourseOverGroundDegrees
+            state.legacyCourseOverGroundDegrees = courseOverGround
+            state.stableLegacyCourseCount = if (previous != null &&
+                abs(angleDeltaDegrees(courseOverGround, previous)) <=
+                config.maximumLegacyCourseDeltaDegrees
+            ) state.stableLegacyCourseCount + 1 else 1
             speed >= config.legacyMinimumCourseSpeedMetersPerSecond &&
                 horizontalAccuracy <= config.legacyMaximumCourseHorizontalAccuracyMeters &&
-                state.stableLegacyBearingCount >= 3
+                state.stableLegacyCourseCount >= 3
         }
         if (!acceptable) {
-            val preserveLegacyEvidence = bearingAccuracy == null &&
+            val preserveLegacyEvidence = courseAccuracy == null &&
                 speed >= config.legacyMinimumCourseSpeedMetersPerSecond &&
                 horizontalAccuracy <= config.legacyMaximumCourseHorizontalAccuracyMeters
-            return clearCourse(resetLegacyBearing = !preserveLegacyEvidence)
+            return clearCourse(resetLegacyCourse = !preserveLegacyEvidence)
         }
 
-        val newCourse = normalizeRadians(Math.toRadians(bearing - declination))
+        val newCourse = normalizeRadians(Math.toRadians(courseOverGround - declination))
         val priorCourse = state.courseRadians
         val priorYaw = state.courseAnchorYawRadians
         if (priorCourse != null && priorYaw != null) {
@@ -557,7 +570,7 @@ class SpeedEstimator(
             val maximumDifference = Math.toRadians(
                 max(
                     config.maximumCourseInconsistencyDegrees,
-                    3.0 * (bearingAccuracy ?: config.maximumLegacyBearingDeltaDegrees)
+                    3.0 * (courseAccuracy ?: config.maximumLegacyCourseDeltaDegrees)
                 )
             )
             if (abs(angleDelta(newCourse, expectedCourse)) > maximumDifference) {
@@ -647,35 +660,37 @@ class SpeedEstimator(
         }
     }
 
-    private fun clearCourse(resetLegacyBearing: Boolean = true) {
+    private fun clearCourse(resetLegacyCourse: Boolean = true) {
         state.courseRadians = null
         state.courseAnchorYawRadians = null
         state.courseAnchorNanos = 0L
         resetAccelerationFilter()
-        if (resetLegacyBearing) {
-            state.legacyBearingDegrees = null
-            state.stableLegacyBearingCount = 0
+        if (resetLegacyCourse) {
+            state.legacyCourseOverGroundDegrees = null
+            state.stableLegacyCourseCount = 0
         }
     }
 
     private fun invalidateCourseIfUnusable(measurement: GnssMeasurement, speed: Double?) {
         if (mode != TrackingMode.FIXED) return
-        val hasModernBearingAccuracy = measurement.bearingAccuracyDegrees != null
-        val minimumSpeed = if (hasModernBearingAccuracy) {
+        val hasModernCourseAccuracy = measurement.courseOverGroundAccuracyDegrees != null
+        val minimumSpeed = if (hasModernCourseAccuracy) {
             config.minimumCourseSpeedMetersPerSecond
         } else {
             config.legacyMinimumCourseSpeedMetersPerSecond
         }
-        val maximumHorizontalAccuracy = if (hasModernBearingAccuracy) {
+        val maximumHorizontalAccuracy = if (hasModernCourseAccuracy) {
             config.maximumCourseHorizontalAccuracyMeters
         } else {
             config.legacyMaximumCourseHorizontalAccuracyMeters
         }
         val unusable = speed == null || !speed.isFinite() || speed < minimumSpeed ||
-            measurement.bearingDegrees == null ||
+            measurement.courseOverGroundDegrees == null ||
             measurement.horizontalAccuracyMeters == null || measurement.magneticDeclinationDegrees == null ||
             measurement.horizontalAccuracyMeters > maximumHorizontalAccuracy ||
-            measurement.bearingAccuracyDegrees?.let { it > config.maximumBearingAccuracyDegrees } == true
+            measurement.courseOverGroundAccuracyDegrees?.let {
+                it > config.maximumCourseOverGroundAccuracyDegrees
+            } == true
         if (unusable) clearCourse()
     }
 

@@ -7,9 +7,11 @@ import com.mightykatun.speedometer.app.domain.model.EstimateQuality
 import com.mightykatun.speedometer.app.domain.model.MaximumCandidate
 import com.mightykatun.speedometer.app.domain.model.MaximumCandidateChange
 import com.mightykatun.speedometer.app.domain.model.PositionFix
+import com.mightykatun.speedometer.app.domain.model.PortraitDisplayMode
 import com.mightykatun.speedometer.app.domain.model.RefreshRate
 import com.mightykatun.speedometer.app.domain.model.SessionConfig
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
+import com.mightykatun.speedometer.app.domain.model.VesselHeading
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -22,6 +24,151 @@ class SpeedometerViewModelTest {
     private val viewModel = SpeedometerViewModel(
         SessionStatisticsTracker(SessionConfig(), clock)
     )
+
+    @Test
+    fun `portrait display cycles normal focus regatta and survives session reset`() {
+        assertEquals(PortraitDisplayMode.NORMAL, viewModel.state.portraitDisplayMode)
+
+        viewModel.cyclePortraitDisplayMode()
+        assertEquals(PortraitDisplayMode.SPEED_FOCUS, viewModel.state.portraitDisplayMode)
+        viewModel.cyclePortraitDisplayMode()
+        assertEquals(PortraitDisplayMode.REGATTA, viewModel.state.portraitDisplayMode)
+
+        viewModel.onSessionReset()
+        assertEquals(PortraitDisplayMode.REGATTA, viewModel.state.portraitDisplayMode)
+        viewModel.cyclePortraitDisplayMode()
+        assertEquals(PortraitDisplayMode.NORMAL, viewModel.state.portraitDisplayMode)
+    }
+
+    @Test
+    fun `regatta marks use accurate accepted fixes and calculate line metrics`() {
+        viewModel.onSessionStart()
+        viewModel.onPositionFixReceived(
+            position(1_000, latitude = 0.0, longitude = 0.0005, horizontalAccuracyMeters = 1f)
+        )
+        viewModel.onPositionFixReceived(
+            position(2_000, latitude = 0.0, longitude = 0.0005, horizontalAccuracyMeters = 1f)
+        )
+        assertTrue(viewModel.captureBoatMark())
+
+        viewModel.onPositionFixReceived(
+            position(3_000, latitude = 0.0, longitude = -0.0005, horizontalAccuracyMeters = 1f)
+        )
+        assertTrue(viewModel.capturePinMark())
+
+        viewModel.onPositionFixReceived(
+            position(
+                milliseconds = 4_000,
+                latitude = -0.0001,
+                longitude = 0.0,
+                horizontalAccuracyMeters = 1f,
+                groundSpeedMetersPerSecond = 5f,
+                courseOverGroundDegrees = 0f,
+                groundSpeedAccuracyMetersPerSecond = 0.1f,
+                courseAccuracyDegrees = 1f
+            )
+        )
+
+        assertEquals(11.06, viewModel.state.regattaMetrics.signedDistanceToLineMeters!!, 0.05)
+        assertEquals(2.21, viewModel.state.regattaMetrics.timeToLineSeconds!!, 0.03)
+    }
+
+    @Test
+    fun `marks survive stop and global reset until individually cleared`() {
+        viewModel.onSessionStart()
+        viewModel.onPositionFixReceived(position(1_000, latitude = 0.0))
+        viewModel.onPositionFixReceived(position(2_000, latitude = 0.0))
+        assertTrue(viewModel.capturePinMark())
+        assertTrue(viewModel.captureBoatMark())
+
+        viewModel.onAcquisitionStopped()
+        assertTrue(viewModel.state.pinMark != null)
+        assertTrue(viewModel.state.boatMark != null)
+        viewModel.onSessionReset()
+        assertTrue(viewModel.state.pinMark != null)
+        assertTrue(viewModel.state.boatMark != null)
+
+        viewModel.clearPinMark()
+        assertNull(viewModel.state.pinMark)
+        assertTrue(viewModel.state.boatMark != null)
+        viewModel.clearBoatMark()
+        assertNull(viewModel.state.boatMark)
+    }
+
+    @Test
+    fun `retained line regains distance from first fix after acquisition restart`() {
+        viewModel.onSessionStart()
+        viewModel.onPositionFixReceived(
+            position(1_000, latitude = 0.0, longitude = 0.0005, horizontalAccuracyMeters = 1f)
+        )
+        assertTrue(viewModel.captureBoatMark())
+        viewModel.onPositionFixReceived(
+            position(2_000, latitude = 0.0, longitude = -0.0005, horizontalAccuracyMeters = 1f)
+        )
+        assertTrue(viewModel.capturePinMark())
+        viewModel.onAcquisitionStopped()
+        assertNull(viewModel.state.regattaMetrics.signedDistanceToLineMeters)
+
+        viewModel.onSessionStart()
+        viewModel.onPositionFixReceived(
+            position(3_000, latitude = -0.0001, longitude = 0.0, horizontalAccuracyMeters = 1f)
+        )
+
+        assertEquals(11.06, viewModel.state.regattaMetrics.signedDistanceToLineMeters!!, 0.05)
+    }
+
+    @Test
+    fun `mark capture rejects missing poor and stale fixes`() {
+        viewModel.onSessionStart()
+        assertTrue(!viewModel.capturePinMark())
+        viewModel.onPositionFixReceived(
+            position(1_000, latitude = 0.0, horizontalAccuracyMeters = 10.01f)
+        )
+        viewModel.onPositionFixReceived(
+            position(2_000, latitude = 0.0, horizontalAccuracyMeters = 10.01f)
+        )
+        assertTrue(!viewModel.capturePinMark())
+
+        viewModel.onPositionFixReceived(position(3_000, latitude = 0.0))
+        viewModel.onSpeedEstimateReceived(
+            estimate(
+                speed = 1.0,
+                quality = EstimateQuality.TRACKING,
+                timestampNanos = 6_000_000_001L
+            )
+        )
+        assertTrue(!viewModel.capturePinMark())
+    }
+
+    @Test
+    fun `first current fix can capture at the ten meter accuracy boundary`() {
+        viewModel.onSessionStart()
+        viewModel.onPositionFixReceived(
+            position(1_000, latitude = 51.0, horizontalAccuracyMeters = 10f)
+        )
+
+        assertTrue(viewModel.capturePinMark())
+        assertEquals(10f, viewModel.state.pinMark!!.horizontalAccuracyMeters, 0f)
+    }
+
+    @Test
+    fun `heading follows refresh cadence and clears unavailable immediately`() {
+        viewModel.onSessionStart()
+        viewModel.onRefreshRateChanged(RefreshRate.TWO_SECONDS)
+        viewModel.onVesselHeadingReceived(VesselHeading(10f, 2f, 1_000_000_000L))
+        viewModel.onVesselHeadingReceived(VesselHeading(20f, 2f, 1_500_000_000L))
+        assertEquals(10f, viewModel.state.vesselHeading!!.trueDegrees, 0f)
+
+        viewModel.onVesselHeadingReceived(VesselHeading(30f, 2f, 3_000_000_000L))
+        assertEquals(30f, viewModel.state.vesselHeading!!.trueDegrees, 0f)
+        viewModel.onVesselHeadingReceived(null)
+        assertNull(viewModel.state.vesselHeading)
+
+        viewModel.onVesselHeadingReceived(VesselHeading(40f, 2f, 4_000_000_000L))
+        assertEquals(40f, viewModel.state.vesselHeading!!.trueDegrees, 0f)
+        viewModel.onAcquisitionStopped()
+        assertNull(viewModel.state.vesselHeading)
+    }
 
     @Test
     fun `low speed estimate remains visible`() {
@@ -488,12 +635,20 @@ class SpeedometerViewModelTest {
         milliseconds: Long,
         latitude: Double,
         longitude: Double = 4.0,
-        horizontalAccuracyMeters: Float = 5f
+        horizontalAccuracyMeters: Float = 5f,
+        groundSpeedMetersPerSecond: Float? = null,
+        courseOverGroundDegrees: Float? = 0f,
+        groundSpeedAccuracyMetersPerSecond: Float? = null,
+        courseAccuracyDegrees: Float? = null
     ) = PositionFix(
         latitudeDegrees = latitude,
         longitudeDegrees = longitude,
-        headingDegrees = 0f,
+        courseOverGroundDegrees = courseOverGroundDegrees,
         horizontalAccuracyMeters = horizontalAccuracyMeters,
-        timestampNanos = milliseconds * 1_000_000L
+        timestampNanos = milliseconds * 1_000_000L,
+        groundSpeedMetersPerSecond = groundSpeedMetersPerSecond,
+        groundSpeedAccuracyMetersPerSecond = groundSpeedAccuracyMetersPerSecond,
+        courseAccuracyDegrees = courseAccuracyDegrees,
+        groundVelocityAccepted = true
     )
 }

@@ -20,7 +20,9 @@
 - Android boundaries are the injectable worker/dispatcher/location/motion interfaces in `RepositoryPlatform.kt`. Repository lifecycle and ordering behavior is intentionally covered by local JVM tests using fakes, not only device tests.
 - `domain/` is pure Kotlin. Measurement and estimator timestamps use elapsed-realtime nanoseconds; do not substitute wall-clock time or callback arrival time. Read `WIKI.md` before changing estimator or measurement semantics.
 - GNSS is the absolute speed source in both modes. `HANDHELD` ignores IMU; `FIXED` requires both linear-acceleration and rotation-vector sensors and must fall back to handheld if registration fails.
+- Vessel heading is a separate all-mode foreground channel: fused rotation vector, geomagnetic rotation-vector fallback, aft-facing portrait `-Z` bow axis, and offline WMM2025 true-north correction. Never substitute GPS course over ground when heading is unavailable, and never feed heading into speed estimation, maxima, trail sampling, or GPX.
 - IMU may only bridge bounded short dropouts; it must not raise session maximum speed. Maximum candidates come from accepted raw GNSS, and stale/unreliable speed becomes unavailable rather than a synthetic zero or display floor.
+- `PositionFix.courseOverGroundDegrees` is Android `Location.bearing`, not device heading. Regatta line points are in-memory state that survive acquisition stops and the normal session reset, clear only through their individual controls or process death, and require a current fix with at most 10 m horizontal accuracy.
 - Preserve the privacy boundary: the manifest has location permissions but no internet permission, and the app has no analytics or network dependency. Location leaves memory only through an explicit user-triggered GPX export to Downloads on Android 10+.
 
 ## Tests

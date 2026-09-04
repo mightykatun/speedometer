@@ -6,11 +6,13 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import com.mightykatun.speedometer.app.domain.SpeedEstimator
+import com.mightykatun.speedometer.app.domain.geomagnetic.GeomagneticFieldEstimate
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
 import com.mightykatun.speedometer.app.domain.model.GnssMeasurement
 import com.mightykatun.speedometer.app.domain.model.PositionFix
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import com.mightykatun.speedometer.app.domain.model.TrackingMode
+import com.mightykatun.speedometer.app.domain.model.VesselHeading
 import java.util.ArrayDeque
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -127,6 +129,227 @@ class SpeedRepositoryImplTest {
         assertEquals(1, fixture.motion.registerCount)
         assertTrue(fixture.motion.unregisterCount >= 1)
         verify(fixture.estimator).reset(TrackingMode.HANDHELD)
+    }
+
+    @Test
+    fun `heading registers in handheld and is independent of motion fallback`() {
+        val handheld = Fixture()
+        handheld.repository.start(TrackingMode.HANDHELD, Recording())
+        handheld.worker.runAll()
+        assertEquals(1, handheld.heading.registerCount)
+        assertEquals(0, handheld.motion.registerCount)
+
+        val fallback = Fixture()
+        fallback.motion.registrationSucceeds = false
+        fallback.repository.start(TrackingMode.FIXED, Recording())
+        fallback.worker.runAll()
+        assertEquals(1, fallback.heading.registerCount)
+        assertEquals(1, fallback.motion.registerCount)
+    }
+
+    @Test
+    fun `heading registration failure does not fail GPS acquisition`() {
+        val fixture = Fixture()
+        fixture.heading.registrationSucceeds = false
+        val recording = Recording()
+
+        fixture.repository.start(TrackingMode.HANDHELD, recording)
+        fixture.worker.runAll()
+        fixture.main.runAll()
+
+        assertEquals(listOf(TrackingMode.HANDHELD), recording.modes)
+        assertTrue(recording.errors.isEmpty())
+        assertEquals(1, fixture.location.requestCount)
+    }
+
+    @Test
+    fun `fresh magnetic sample and location declination deliver true heading`() {
+        val fixture = Fixture()
+        val recording = Recording()
+        fixture.repository.start(TrackingMode.HANDHELD, recording)
+        fixture.worker.runAll()
+        fixture.location.emitLocation(
+            locationAt(
+                timestampNanos = 2_000_000_000L,
+                horizontalAccuracy = 5f,
+                utcTimeMillis = 1_735_689_600_000L
+            )
+        )
+        fixture.heading.emit(
+            HeadingSensorSample(
+                magneticDegrees = 90.0,
+                accuracyDegrees = 3.0,
+                source = HeadingSensorSource.ROTATION_VECTOR,
+                timestampNanos = 2_100_000_000L
+            )
+        )
+        fixture.worker.nowNanos = 2_200_000_000L
+        fixture.worker.runNextDelayed()
+        fixture.main.runAll()
+
+        val heading = requireNotNull(recording.headings.last())
+        assertEquals(92f, heading.trueDegrees, 0f)
+        assertEquals(3f, heading.accuracyDegrees!!, 0f)
+    }
+
+    @Test
+    fun `invalid or blackout geomagnetic evidence clears true heading and estimator declination`() {
+        val fixture = Fixture()
+        val recording = Recording()
+        fixture.repository.start(TrackingMode.HANDHELD, recording)
+        fixture.worker.runAll()
+        fixture.location.emitLocation(
+            locationAt(
+                timestampNanos = 2_000_000_000L,
+                horizontalAccuracy = 5f,
+                utcTimeMillis = 1_735_689_600_000L
+            )
+        )
+        fixture.heading.emit(
+            HeadingSensorSample(
+                magneticDegrees = 90.0,
+                accuracyDegrees = 3.0,
+                source = HeadingSensorSource.ROTATION_VECTOR,
+                timestampNanos = 2_100_000_000L
+            )
+        )
+        fixture.worker.nowNanos = 2_200_000_000L
+        fixture.worker.runNextDelayed()
+        fixture.main.runAll()
+        assertEquals(92f, requireNotNull(recording.headings.last()).trueDegrees, 0f)
+
+        fixture.geomagnetic.estimate = null
+        fixture.location.emitLocation(
+            locationAt(
+                timestampNanos = 3_000_000_000L,
+                horizontalAccuracy = 5f,
+                utcTimeMillis = 1_735_689_600_000L
+            )
+        )
+        fixture.heading.emit(
+            HeadingSensorSample(
+                magneticDegrees = 90.0,
+                accuracyDegrees = 3.0,
+                source = HeadingSensorSource.ROTATION_VECTOR,
+                timestampNanos = 3_100_000_000L
+            )
+        )
+        fixture.worker.nowNanos = 3_200_000_000L
+        fixture.worker.runNextDelayed()
+        fixture.main.runAll()
+        assertNull(recording.headings.last())
+
+        val blackout = Fixture()
+        blackout.geomagnetic.estimate = GeomagneticFieldEstimate(5.0, 1_999.0, 40_000.0)
+        blackout.repository.start(TrackingMode.FIXED, Recording())
+        blackout.worker.runAll()
+        blackout.location.emitLocation(
+            locationAt(
+                timestampNanos = 2_000_000_000L,
+                horizontalAccuracy = 5f,
+                utcTimeMillis = 1_735_689_600_000L
+            )
+        )
+        assertNull(blackout.capturedMeasurement().magneticDeclinationDegrees)
+    }
+
+    @Test
+    fun `estimator-rejected fix retains raw COG but is ineligible for TTL`() {
+        val fixture = Fixture()
+        whenever(fixture.estimator.ingestGnssMeasurement(any())).thenReturn(null)
+        whenever(fixture.estimator.isGnssMeasurementAccepted(any())).thenReturn(false)
+        val recording = Recording()
+        fixture.repository.start(TrackingMode.HANDHELD, recording)
+        fixture.worker.runAll()
+        fixture.location.emitLocation(
+            locationAt(
+                timestampNanos = 2_000_000_000L,
+                bearing = 90f,
+                horizontalAccuracy = 5f
+            )
+        )
+        fixture.main.runAll()
+
+        val fix = recording.positionFixes.single()
+        assertEquals(0.0, fix.latitudeDegrees, 0.0)
+        assertEquals(5f, fix.groundSpeedMetersPerSecond!!, 0f)
+        assertNull(fix.groundSpeedAccuracyMetersPerSecond)
+        assertEquals(90f, fix.courseOverGroundDegrees!!, 0f)
+        assertNull(fix.courseAccuracyDegrees)
+        assertTrue(!fix.groundVelocityAccepted)
+    }
+
+    @Test
+    fun `output tick reconciles replay acceptance for every recent fix`() {
+        val fixture = Fixture()
+        val recording = Recording()
+        fixture.repository.start(TrackingMode.HANDHELD, recording)
+        fixture.worker.runAll()
+        fixture.location.emitLocation(
+            locationAt(
+                timestampNanos = 2_000_000_000L,
+                bearing = 90f,
+                horizontalAccuracy = 5f
+            )
+        )
+        fixture.main.runAll()
+        assertTrue(recording.positionFixes.last().groundVelocityAccepted)
+
+        fixture.location.emitLocation(
+            locationAt(
+                timestampNanos = 3_000_000_000L,
+                bearing = 45f,
+                horizontalAccuracy = 5f
+            )
+        )
+        fixture.main.runAll()
+        assertTrue(recording.positionFixes.last().groundVelocityAccepted)
+
+        whenever(fixture.estimator.isGnssMeasurementAccepted(any())).thenReturn(false)
+        fixture.worker.nowNanos = 3_100_000_000L
+        fixture.worker.runNextDelayed()
+        fixture.main.runAll()
+
+        val olderReplacement = recording.positionFixes.first {
+            it.timestampNanos == 2_000_000_000L && !it.groundVelocityAccepted
+        }
+        val latestReplacement = recording.positionFixes.first {
+            it.timestampNanos == 3_000_000_000L && !it.groundVelocityAccepted
+        }
+        assertEquals(90f, olderReplacement.courseOverGroundDegrees!!, 0f)
+        assertEquals(45f, latestReplacement.courseOverGroundDegrees!!, 0f)
+    }
+
+    @Test
+    fun `stop suppresses queued heading and unregisters its sensor`() {
+        val fixture = Fixture()
+        val recording = Recording()
+        fixture.repository.start(TrackingMode.HANDHELD, recording)
+        fixture.worker.runAll()
+        fixture.location.emitLocation(
+            locationAt(
+                timestampNanos = 2_000_000_000L,
+                horizontalAccuracy = 5f,
+                utcTimeMillis = 1_735_689_600_000L
+            )
+        )
+        fixture.heading.emit(
+            HeadingSensorSample(
+                magneticDegrees = 90.0,
+                accuracyDegrees = 3.0,
+                source = HeadingSensorSource.ROTATION_VECTOR,
+                timestampNanos = 2_100_000_000L
+            )
+        )
+        fixture.worker.nowNanos = 2_200_000_000L
+        fixture.worker.runNextDelayed()
+
+        fixture.repository.stopUpdates()
+        fixture.main.runAll()
+        fixture.worker.runAll()
+
+        assertTrue(recording.headings.isEmpty())
+        assertTrue(fixture.heading.unregisterCount >= 1)
     }
 
     @Test
@@ -290,14 +513,14 @@ class SpeedRepositoryImplTest {
             satelliteCount = 7,
             magneticDeclinationDegrees = 1.25,
             speedAccuracyMetersPerSecond = 0.4f,
-            bearingAccuracyDegrees = 2.5f,
+            courseOverGroundAccuracyDegrees = 2.5f,
             includeCourseFields = true
         )
 
         assertEquals(12.5, measurement.speedMetersPerSecond!!, 0.0)
         assertEquals(0.4, measurement.speedAccuracyMetersPerSecond!!, 0.000001)
-        assertEquals(123.5, measurement.bearingDegrees!!, 0.0)
-        assertEquals(2.5, measurement.bearingAccuracyDegrees!!, 0.0)
+        assertEquals(123.5, measurement.courseOverGroundDegrees!!, 0.0)
+        assertEquals(2.5, measurement.courseOverGroundAccuracyDegrees!!, 0.0)
         assertEquals(4.5, measurement.horizontalAccuracyMeters!!, 0.0)
         assertEquals(1.25, measurement.magneticDeclinationDegrees!!, 0.0)
         assertEquals(7, measurement.satelliteCount)
@@ -316,14 +539,14 @@ class SpeedRepositoryImplTest {
             satelliteCount = 0,
             magneticDeclinationDegrees = null,
             speedAccuracyMetersPerSecond = -1f,
-            bearingAccuracyDegrees = -1f,
+            courseOverGroundAccuracyDegrees = -1f,
             includeCourseFields = true
         )
 
         assertNull(measurement.speedMetersPerSecond)
         assertNull(measurement.speedAccuracyMetersPerSecond)
-        assertNull(measurement.bearingDegrees)
-        assertNull(measurement.bearingAccuracyDegrees)
+        assertNull(measurement.courseOverGroundDegrees)
+        assertNull(measurement.courseOverGroundAccuracyDegrees)
         assertNull(measurement.horizontalAccuracyMeters)
     }
 
@@ -338,20 +561,20 @@ class SpeedRepositoryImplTest {
             satelliteCount = 4,
             magneticDeclinationDegrees = 2.0,
             speedAccuracyMetersPerSecond = 0.3f,
-            bearingAccuracyDegrees = 1f,
+            courseOverGroundAccuracyDegrees = 1f,
             includeCourseFields = false
         )
 
         assertEquals(5.0, measurement.speedMetersPerSecond!!, 0.0)
         assertEquals(0.3, measurement.speedAccuracyMetersPerSecond!!, 0.000001)
-        assertNull(measurement.bearingDegrees)
-        assertNull(measurement.bearingAccuracyDegrees)
+        assertNull(measurement.courseOverGroundDegrees)
+        assertNull(measurement.courseOverGroundAccuracyDegrees)
         assertNull(measurement.horizontalAccuracyMeters)
         assertNull(measurement.magneticDeclinationDegrees)
     }
 
     @Test
-    fun `position fixes retain coordinates and normalized heading`() {
+    fun `position fixes retain coordinates and normalized course and velocity evidence`() {
         val fix = requireNotNull(
             createPositionFix(
                 locationAt(
@@ -362,17 +585,22 @@ class SpeedRepositoryImplTest {
                     longitude = -0.1278,
                     altitude = 35.4,
                     utcTimeMillis = 1_704_067_200_000L
-                )
+                ),
+                speedAccuracyMetersPerSecond = 0.4f,
+                courseAccuracyDegrees = 2.5f
             )
         )
 
         assertEquals(51.5074, fix.latitudeDegrees, 0.0)
         assertEquals(-0.1278, fix.longitudeDegrees, 0.0)
-        assertEquals(315f, fix.headingDegrees!!, 0f)
+        assertEquals(315f, fix.courseOverGroundDegrees!!, 0f)
         assertEquals(4.5f, fix.horizontalAccuracyMeters, 0f)
         assertEquals(35.4, fix.altitudeMeters!!, 0.0)
         assertEquals(10_000_000_000L, fix.timestampNanos)
         assertEquals(1_704_067_200_000L, fix.utcTimeMillis)
+        assertEquals(5f, fix.groundSpeedMetersPerSecond!!, 0f)
+        assertEquals(0.4f, fix.groundSpeedAccuracyMetersPerSecond!!, 0f)
+        assertEquals(2.5f, fix.courseAccuracyDegrees!!, 0f)
     }
 
     @Test
@@ -557,6 +785,8 @@ class SpeedRepositoryImplTest {
         val main = FakeMainDispatcher()
         val location = FakeLocationGateway()
         val motion = FakeMotionGateway(supportsFixedMode)
+        val heading = FakeHeadingGateway()
+        val geomagnetic = FakeGeomagneticModel()
         val estimator = mock<SpeedEstimator>()
         val repository: SpeedRepositoryImpl
 
@@ -564,8 +794,17 @@ class SpeedRepositoryImplTest {
             whenever(estimator.ingestGnssMeasurement(any())).thenAnswer { invocation ->
                 invocation.getArgument<GnssMeasurement>(0).timestampNanos
             }
+            whenever(estimator.isGnssMeasurementAccepted(any())).thenReturn(true)
             whenever(estimator.snapshotAt(any())).thenReturn(estimate())
-            repository = SpeedRepositoryImpl(estimator, worker, main, location, motion)
+            repository = SpeedRepositoryImpl(
+                estimator,
+                worker,
+                main,
+                location,
+                motion,
+                heading,
+                geomagnetic
+            )
         }
 
         private fun estimate() = SpeedEstimate(
@@ -580,6 +819,7 @@ class SpeedRepositoryImplTest {
         val estimates = mutableListOf<SpeedEstimate>()
         val satelliteCounts = mutableListOf<Int>()
         val positionFixes = mutableListOf<PositionFix>()
+        val headings = mutableListOf<VesselHeading?>()
         val errors = mutableListOf<RepositoryError>()
         val modeResults = mutableListOf<TrackingModeResult>()
         val modes: List<TrackingMode>
@@ -599,6 +839,7 @@ class SpeedRepositoryImplTest {
             },
             onSatelliteCount = recording.satelliteCounts::add,
             onPositionFix = recording.positionFixes::add,
+            onVesselHeading = recording.headings::add,
             onGpsProviderEnabled = { recording.providerEnabledCount++ },
             onGpsRecoveryAccepted = {
                 recording.recoveryCount++
@@ -732,5 +973,41 @@ class SpeedRepositoryImplTest {
         override fun unregister(listener: SensorEventListener) {
             unregisterCount++
         }
+    }
+
+    private class FakeHeadingGateway : RepositoryHeadingGateway {
+        override var supportsHeading = true
+        var registrationSucceeds = true
+        var registerCount = 0
+        var unregisterCount = 0
+        private var listener: RepositoryHeadingListener? = null
+
+        override fun register(listener: RepositoryHeadingListener): Boolean {
+            registerCount++
+            if (!registrationSucceeds) return false
+            this.listener = listener
+            return true
+        }
+
+        override fun unregister() {
+            unregisterCount++
+            listener = null
+        }
+
+        fun emit(sample: HeadingSensorSample) {
+            requireNotNull(listener).onHeadingSample(sample)
+        }
+    }
+
+    private class FakeGeomagneticModel : RepositoryGeomagneticModel {
+        var estimate: GeomagneticFieldEstimate? =
+            GeomagneticFieldEstimate(2.0, 30_000.0, 45_000.0)
+
+        override fun evaluate(
+            latitudeDegrees: Double,
+            longitudeDegrees: Double,
+            altitudeMeters: Double,
+            utcTimeMillis: Long
+        ): GeomagneticFieldEstimate? = estimate
     }
 }

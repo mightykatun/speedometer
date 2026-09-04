@@ -50,6 +50,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -58,6 +59,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.TextUnit
 import androidx.core.app.ActivityCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -66,6 +68,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import com.mightykatun.speedometer.app.di.SpeedometerViewModelFactory
 import com.mightykatun.speedometer.app.data.repository.TrackingModeResult
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
+import com.mightykatun.speedometer.app.domain.model.PortraitDisplayMode
 import com.mightykatun.speedometer.app.domain.model.RefreshRate
 import com.mightykatun.speedometer.app.domain.model.SpeedUnit
 import com.mightykatun.speedometer.app.domain.model.SpeedometerState
@@ -79,6 +82,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
 
@@ -87,7 +91,6 @@ class MainActivity : ComponentActivity() {
     private val speedRepository get() = repositoryViewModel.repository
 
     private var isInPipMode by mutableStateOf(false)
-    private var isSpeedFocusMode by mutableStateOf(false)
     private var speedUnit by mutableStateOf(SpeedUnit.KILOMETERS_PER_HOUR)
     private var effectiveTrackingMode by mutableStateOf(TrackingMode.HANDHELD)
     private var refreshRate by mutableStateOf(RefreshRate.ONE_SECOND)
@@ -161,9 +164,16 @@ class MainActivity : ComponentActivity() {
                 onEnterPip = { enterPipMode() },
                 onRequestPermission = { requestLocationPermission() },
                 onOpenSettings = { openAppSettings() },
-                isSpeedFocusMode = isSpeedFocusMode,
-                onSpeedDoubleTap = { isSpeedFocusMode = !isSpeedFocusMode },
-                onPositionTrailDoubleTap = ::exportPositionTrail
+                onPortraitDisplayCycle = viewModel::cyclePortraitDisplayMode,
+                onPositionTrailDoubleTap = ::exportPositionTrail,
+                onPinMarkCapture = {
+                    if (!viewModel.capturePinMark()) showMarkCaptureWarning()
+                },
+                onBoatMarkCapture = {
+                    if (!viewModel.captureBoatMark()) showMarkCaptureWarning()
+                },
+                onPinMarkClear = viewModel::clearPinMark,
+                onBoatMarkClear = viewModel::clearBoatMark
             )
         }
     }
@@ -243,7 +253,6 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         if (!isChangingConfigurations) {
-            isSpeedFocusMode = false
             speedRepository.stopUpdates()
             viewModel.onAcquisitionStopped()
         }
@@ -265,6 +274,7 @@ class MainActivity : ComponentActivity() {
             onEstimate = viewModel::onSpeedEstimateReceived,
             onSatelliteCount = viewModel::onSatelliteCountReceived,
             onPositionFix = viewModel::onPositionFixReceived,
+            onVesselHeading = viewModel::onVesselHeadingReceived,
             onGpsProviderEnabled = viewModel::onGpsProviderEnabled,
             onGpsRecoveryAccepted = viewModel::onGpsRecoveryAccepted,
             onPermissionRequired = {
@@ -338,6 +348,10 @@ class MainActivity : ComponentActivity() {
                 Toast.LENGTH_SHORT
             ).show()
         }
+    }
+
+    private fun showMarkCaptureWarning() {
+        Toast.makeText(this, "Accurate current GPS fix required", Toast.LENGTH_SHORT).show()
     }
 
     private fun requestLocationPermission() {
@@ -453,9 +467,12 @@ fun SpeedometerScreen(
     onEnterPip: () -> Unit,
     onRequestPermission: () -> Unit,
     onOpenSettings: () -> Unit,
-    isSpeedFocusMode: Boolean = false,
-    onSpeedDoubleTap: () -> Unit = {},
-    onPositionTrailDoubleTap: () -> Unit = {}
+    onPortraitDisplayCycle: () -> Unit = {},
+    onPositionTrailDoubleTap: () -> Unit = {},
+    onPinMarkCapture: () -> Unit = {},
+    onBoatMarkCapture: () -> Unit = {},
+    onPinMarkClear: () -> Unit = {},
+    onBoatMarkClear: () -> Unit = {}
 ) {
     val isDark = isSystemInDarkTheme()
     val backgroundColor = if (isDark) Color.Black else Color.White
@@ -490,7 +507,7 @@ fun SpeedometerScreen(
     val currentAccuracyMetersPerSecond = state.speedAccuracyKmh
         ?.div(KILOMETERS_PER_HOUR_PER_METER_PER_SECOND)
     val maxSpeed = speedUnit.fromKilometersPerHour(state.maxSpeedKmh)
-    val currentOnSpeedDoubleTap by rememberUpdatedState(onSpeedDoubleTap)
+    val currentOnPortraitDisplayCycle by rememberUpdatedState(onPortraitDisplayCycle)
 
     BoxWithConstraints(
         modifier = Modifier
@@ -501,18 +518,23 @@ fun SpeedometerScreen(
         val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
         val fontAwareHeight = maxHeight / fontScale
         val isLandscapeLayout = maxWidth > maxHeight
-        val focusedDisplay = isSpeedFocusMode || isLandscapeLayout
+        val regattaDisplay = state.portraitDisplayMode == PortraitDisplayMode.REGATTA &&
+            !isLandscapeLayout && !isInPipMode
+        val focusedDisplay = state.portraitDisplayMode == PortraitDisplayMode.SPEED_FOCUS ||
+            isLandscapeLayout || isInPipMode
+        val normalDisplay = !focusedDisplay && !regattaDisplay
         val compactLayout = fontAwareHeight < 480.dp
+        val compactRegattaLayout = compactLayout || fontAwareHeight < 540.dp
         val veryCompactLayout = fontAwareHeight < 340.dp
-        val showTrend = !isInPipMode && !focusedDisplay && fontAwareHeight >= 300.dp
-        val showStats = !isInPipMode && !focusedDisplay && fontAwareHeight >= 300.dp
-        val compactActions = !isInPipMode && fontAwareHeight < 300.dp
+        val showTrend = normalDisplay && fontAwareHeight >= 300.dp
+        val showStats = normalDisplay && fontAwareHeight >= 300.dp
+        val compactActions = normalDisplay && fontAwareHeight < 300.dp
         val minimumTrailHeight = if (warning == null) 650.dp else 700.dp
-        val showPositionTrail = !isInPipMode && !focusedDisplay && maxHeight >= 760.dp &&
+        val showPositionTrail = normalDisplay && maxHeight >= 760.dp &&
             fontAwareHeight >= minimumTrailHeight &&
             state.currentPosition != null
         val positionTrailHeight = (maxHeight * 0.20f).coerceIn(150.dp, 180.dp)
-        val compactWarning = warning?.takeIf { compactLayout }
+        val compactWarning = warning?.takeIf { compactLayout || (regattaDisplay && compactRegattaLayout) }
         val baselineCompact = maxHeight < 480.dp
         val baselineVeryCompact = maxHeight < 340.dp
         fun displaySize(baselineSize: Float) =
@@ -573,7 +595,7 @@ fun SpeedometerScreen(
                 }
             }
         } else {
-            if (!isInPipMode && !focusedDisplay) {
+            if (normalDisplay) {
                 Column(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
@@ -683,7 +705,7 @@ fun SpeedometerScreen(
                             )
                         }
                     }
-                    if (warning != null && !compactLayout) {
+                    if (warning != null && compactWarning == null) {
                         Text(
                             text = warning,
                             color = Color(0xFFFFA000),
@@ -737,8 +759,35 @@ fun SpeedometerScreen(
                 )
             }
 
-            // --- CENTER: Speedometer ---
-            Column(
+            if (regattaDisplay) {
+                RegattaDashboard(
+                    state = state,
+                    displayedSpeedKmh = displayedSpeedKmh,
+                    primaryColor = primaryColor,
+                    secondaryColor = secondaryColor,
+                    tertiaryColor = tertiaryColor,
+                    labelColor = labelColor,
+                    mainSize = mainSpeedSize,
+                    decimalSize = decimalSize,
+                    unitSize = unitSize,
+                    letterSpacing = letterSpacing,
+                    compact = compactRegattaLayout,
+                    quality = displayedQuality,
+                    speedMetersPerSecond = currentSpeedMetersPerSecond,
+                    uncertaintyMetersPerSecond = currentAccuracyMetersPerSecond,
+                    displayedAccuracy = state.speedAccuracyKmh
+                        ?.let(SpeedUnit.KNOTS::fromKilometersPerHour),
+                    unavailableText = unavailableText,
+                    onCycleDisplay = currentOnPortraitDisplayCycle,
+                    onPinCapture = onPinMarkCapture,
+                    onBoatCapture = onBoatMarkCapture,
+                    onPinClear = onPinMarkClear,
+                    onBoatClear = onBoatMarkClear,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                // --- CENTER: Speedometer ---
+                Column(
                 modifier = Modifier
                     .align(Alignment.Center)
                     .offset(
@@ -748,13 +797,14 @@ fun SpeedometerScreen(
                         }
                     ),
                 horizontalAlignment = Alignment.CenterHorizontally
-            ) {
+                ) {
                 val parts = formattedSpeed?.split(".")
                 val intPart = parts?.get(0) ?: "--"
                 val decPart = parts?.getOrNull(1)
                 val placeholderAlpha = speedPlaceholderAlpha(
                     enabled = intPart == "--"
                 )
+                val allowsDisplayCycle = !isLandscapeLayout && !isInPipMode
 
                 Row {
                     Row(
@@ -762,20 +812,20 @@ fun SpeedometerScreen(
                             .alignByBaseline()
                             .semantics(mergeDescendants = true) {
                                 contentDescription = "Speed display"
-                                if (!isLandscapeLayout) {
-                                    onClick(label = "Toggle focused speed display") {
-                                        currentOnSpeedDoubleTap()
+                                if (allowsDisplayCycle) {
+                                    onClick(label = "Cycle portrait display") {
+                                        currentOnPortraitDisplayCycle()
                                         true
                                     }
                                 }
                             }
                             .then(
-                                if (isLandscapeLayout) {
+                                if (!allowsDisplayCycle) {
                                     Modifier
                                 } else {
                                     Modifier.pointerInput(Unit) {
                                         detectTapGestures(
-                                            onDoubleTap = { currentOnSpeedDoubleTap() }
+                                            onDoubleTap = { currentOnPortraitDisplayCycle() }
                                         )
                                     }
                                 }
@@ -846,9 +896,10 @@ fun SpeedometerScreen(
                         unavailableText = unavailableText
                     )
                 }
+                }
             }
 
-            if (!isInPipMode && !focusedDisplay) {
+            if (normalDisplay) {
                 // --- BOTTOM: Stats and actions ---
                 if (showStats) {
                     Column(
@@ -903,6 +954,310 @@ fun SpeedometerScreen(
         }
     }
 }
+
+@Composable
+private fun RegattaDashboard(
+    state: SpeedometerState,
+    displayedSpeedKmh: Float?,
+    primaryColor: Color,
+    secondaryColor: Color,
+    tertiaryColor: Color,
+    labelColor: Color,
+    mainSize: TextUnit,
+    decimalSize: TextUnit,
+    unitSize: TextUnit,
+    letterSpacing: TextUnit,
+    compact: Boolean,
+    quality: EstimateQuality,
+    speedMetersPerSecond: Float?,
+    uncertaintyMetersPerSecond: Float?,
+    displayedAccuracy: Float?,
+    unavailableText: String,
+    onCycleDisplay: () -> Unit,
+    onPinCapture: () -> Unit,
+    onBoatCapture: () -> Unit,
+    onPinClear: () -> Unit,
+    onBoatClear: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val headingInteger = formattedRegattaHeading(state.vesselHeading?.trueDegrees)
+    val speed = displayedSpeedKmh?.let(SpeedUnit.KNOTS::fromKilometersPerHour)
+    val speedParts = speed?.let { "%.2f".format(Locale.US, it) }?.split('.')
+    val speedInteger = speedParts?.firstOrNull() ?: "--"
+    val speedDecimal = speedParts?.getOrNull(1)
+    val headingPlaceholderAlpha = speedPlaceholderAlpha(headingInteger == "--")
+    val speedPlaceholderAlpha = speedPlaceholderAlpha(speedInteger == "--")
+    val currentOnCycleDisplay by rememberUpdatedState(onCycleDisplay)
+
+    Box(modifier = modifier) {
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = if (compact) 40.dp else 84.dp)
+                .semantics {
+                    contentDescription = "True heading display"
+                    onClick(label = "Cycle portrait display") {
+                        currentOnCycleDisplay()
+                        true
+                    }
+                }
+                .pointerInput(Unit) {
+                    detectTapGestures(onDoubleTap = { currentOnCycleDisplay() })
+                }
+        ) {
+            Text(
+                text = headingInteger,
+                style = MaterialTheme.typography.displayLarge.copy(
+                    fontSize = mainSize,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = letterSpacing,
+                    color = primaryColor
+                ),
+                maxLines = 1,
+                softWrap = false,
+                modifier = Modifier
+                    .alignByBaseline()
+                    .graphicsLayer { alpha = headingPlaceholderAlpha.value }
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = "deg",
+                style = MaterialTheme.typography.headlineMedium.copy(
+                    fontSize = unitSize,
+                    color = tertiaryColor
+                ),
+                maxLines = 1,
+                softWrap = false,
+                modifier = Modifier
+                    .alignByBaseline()
+                    .minimumInteractiveComponentSize()
+            )
+        }
+
+        Column(
+            modifier = Modifier.align(Alignment.Center),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Row {
+                Row(
+                    modifier = Modifier
+                        .alignByBaseline()
+                        .semantics(mergeDescendants = true) {
+                            contentDescription = "Speed display"
+                            onClick(label = "Cycle portrait display") {
+                                currentOnCycleDisplay()
+                                true
+                            }
+                        }
+                        .pointerInput(Unit) {
+                            detectTapGestures(onDoubleTap = { currentOnCycleDisplay() })
+                        }
+                ) {
+                    Text(
+                        text = speedInteger,
+                        style = MaterialTheme.typography.displayLarge.copy(
+                            fontSize = mainSize,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = letterSpacing,
+                            color = primaryColor
+                        ),
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier
+                            .alignByBaseline()
+                            .graphicsLayer { alpha = speedPlaceholderAlpha.value }
+                    )
+
+                    if (speedDecimal != null) {
+                        Text(
+                            text = ".$speedDecimal",
+                            style = MaterialTheme.typography.headlineMedium.copy(
+                                fontSize = decimalSize,
+                                fontWeight = FontWeight.Bold,
+                                color = secondaryColor
+                            ),
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier
+                                .alignByBaseline()
+                                .padding(start = 2.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(4.dp))
+
+                Text(
+                    text = SpeedUnit.KNOTS.label,
+                    style = MaterialTheme.typography.headlineMedium.copy(
+                        fontSize = unitSize,
+                        color = tertiaryColor
+                    ),
+                    maxLines = 1,
+                    softWrap = false,
+                    modifier = Modifier
+                        .alignByBaseline()
+                        .minimumInteractiveComponentSize()
+                )
+            }
+
+            AccuracyIndicator(
+                quality = quality,
+                speedMetersPerSecond = speedMetersPerSecond,
+                uncertaintyMetersPerSecond = uncertaintyMetersPerSecond,
+                displayedAccuracy = displayedAccuracy,
+                unit = SpeedUnit.KNOTS.label,
+                isInPipMode = false,
+                unavailableText = unavailableText,
+                showAvailableValue = false
+            )
+        }
+
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(bottom = if (compact) 88.dp else 140.dp),
+            verticalArrangement = Arrangement.spacedBy(if (compact) 0.dp else 4.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                RegattaMetric(
+                    label = "DTL",
+                    value = formattedDistanceToLine(state.regattaMetrics.signedDistanceToLineMeters),
+                    labelColor = labelColor,
+                    valueColor = primaryColor,
+                    compact = compact,
+                    modifier = Modifier.weight(1f)
+                )
+                RegattaMetric(
+                    label = "TTL",
+                    value = formattedTimeToLine(state.regattaMetrics.timeToLineSeconds),
+                    labelColor = labelColor,
+                    valueColor = primaryColor,
+                    compact = compact,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                RegattaMarkButton(
+                    label = "pin",
+                    isSet = state.pinMark != null,
+                    onCapture = onPinCapture,
+                    onClear = onPinClear,
+                    modifier = Modifier
+                        .weight(1f)
+                        .wrapContentWidth(Alignment.CenterHorizontally)
+                )
+                RegattaMarkButton(
+                    label = "boat",
+                    isSet = state.boatMark != null,
+                    onCapture = onBoatCapture,
+                    onClear = onBoatClear,
+                    modifier = Modifier
+                        .weight(1f)
+                        .wrapContentWidth(Alignment.CenterHorizontally)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RegattaMetric(
+    label: String,
+    value: String,
+    labelColor: Color,
+    valueColor: Color,
+    compact: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier.semantics(mergeDescendants = true) {
+            contentDescription = "$label $value"
+        },
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = label,
+            color = labelColor,
+            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+            fontSize = 13.sp
+        )
+        Text(
+            text = value,
+            color = valueColor,
+            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            fontSize = if (compact) 26.sp else 34.sp,
+            maxLines = 1
+        )
+    }
+}
+
+@Composable
+private fun RegattaMarkButton(
+    label: String,
+    isSet: Boolean,
+    onCapture: () -> Unit,
+    onClear: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val isDark = isSystemInDarkTheme()
+    val color = when {
+        isSet && isDark -> Color(0xFF69F0AE)
+        isSet -> Color(0xFF087F23)
+        isDark -> Color(0xFFFF6B6B)
+        else -> Color(0xFFB3261E)
+    }
+    val currentOnCapture by rememberUpdatedState(onCapture)
+    val currentOnClear by rememberUpdatedState(onClear)
+    Text(
+        text = label,
+        color = color,
+        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+        fontWeight = FontWeight.Bold,
+        fontSize = 18.sp,
+        modifier = modifier
+            .minimumInteractiveComponentSize()
+            .padding(horizontal = 8.dp, vertical = 2.dp)
+            .semantics {
+                contentDescription = "${label.replaceFirstChar(Char::uppercase)} line point"
+                stateDescription = if (isSet) "set" else "not set"
+                role = Role.Button
+                onClick(label = if (isSet) "Clear line point" else "Set line point") {
+                    if (isSet) currentOnClear() else currentOnCapture()
+                    true
+                }
+            }
+            .pointerInput(isSet) {
+                detectTapGestures(
+                    onTap = { if (!isSet) currentOnCapture() },
+                    onDoubleTap = {
+                        if (isSet) currentOnClear() else currentOnCapture()
+                    }
+                )
+            }
+    )
+}
+
+internal fun formattedRegattaHeading(headingDegrees: Float?): String {
+    val heading = headingDegrees?.takeIf(Float::isFinite) ?: return "--"
+    val rounded = (((heading % 360f) + 360f) % 360f).roundToInt() % 360
+    return "%03d".format(Locale.US, rounded)
+}
+
+internal fun formattedDistanceToLine(distanceMeters: Double?): String =
+    distanceMeters?.takeIf(Double::isFinite)?.roundToInt()?.let { "$it m" } ?: "-- m"
+
+internal fun formattedTimeToLine(timeSeconds: Double?): String =
+    timeSeconds?.takeIf { it.isFinite() && it >= 0.0 }?.roundToInt()?.let { "$it s" } ?: "-- s"
 
 @Composable
 private fun speedPlaceholderAlpha(enabled: Boolean): State<Float> {
@@ -1000,7 +1355,8 @@ private fun AccuracyIndicator(
     displayedAccuracy: Float?,
     unit: String,
     isInPipMode: Boolean,
-    unavailableText: String = "no signal"
+    unavailableText: String = "no signal",
+    showAvailableValue: Boolean = true
 ) {
     if (quality == EstimateQuality.ACQUIRING) return
 
@@ -1035,6 +1391,7 @@ private fun AccuracyIndicator(
             "$text, ${level.name.lowercase(Locale.US)} accuracy"
         EstimateQuality.ACQUIRING -> "Acquiring speed"
     }
+    val hideAvailableValue = !showAvailableValue && quality != EstimateQuality.UNAVAILABLE
 
     if (isInPipMode) {
         Box(
@@ -1046,14 +1403,18 @@ private fun AccuracyIndicator(
         )
     } else {
         Text(
-            text = text,
-            color = color,
+            text = if (hideAvailableValue) " " else text,
+            color = if (hideAvailableValue) Color.Transparent else color,
             fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
             fontSize = 13.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
-                .semantics { contentDescription = accessibilityText }
+                .then(
+                    if (hideAvailableValue) Modifier else Modifier.semantics {
+                        contentDescription = accessibilityText
+                    }
+                )
                 .padding(top = 8.dp)
         )
     }

@@ -3,6 +3,9 @@ package com.mightykatun.speedometer.app
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
@@ -13,6 +16,7 @@ import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertWidthIsAtLeast
 import androidx.compose.ui.test.doubleClick
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -22,10 +26,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Density
 import com.mightykatun.speedometer.app.domain.model.EstimateQuality
 import com.mightykatun.speedometer.app.domain.model.PositionFix
+import com.mightykatun.speedometer.app.domain.model.PortraitDisplayMode
 import com.mightykatun.speedometer.app.domain.model.RefreshRate
 import com.mightykatun.speedometer.app.domain.model.SpeedUnit
 import com.mightykatun.speedometer.app.domain.model.SpeedometerState
 import com.mightykatun.speedometer.app.domain.model.TrackingMode
+import com.mightykatun.speedometer.app.domain.model.VesselHeading
+import com.mightykatun.speedometer.app.domain.model.RegattaMark
+import com.mightykatun.speedometer.app.domain.model.RegattaMetrics
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -42,7 +50,7 @@ class SpeedometerScreenTest {
         var refreshClicks = 0
         var resetClicks = 0
         var pipClicks = 0
-        var speedFocusToggles = 0
+        var displayCycles = 0
 
         composeRule.setContent {
             SpeedometerScreen(
@@ -66,7 +74,7 @@ class SpeedometerScreenTest {
                 onEnterPip = { pipClicks++ },
                 onRequestPermission = {},
                 onOpenSettings = {},
-                onSpeedDoubleTap = { speedFocusToggles++ }
+                onPortraitDisplayCycle = { displayCycles++ }
             )
         }
 
@@ -97,40 +105,43 @@ class SpeedometerScreenTest {
             assertEquals(1, refreshClicks)
             assertEquals(1, resetClicks)
             assertEquals(1, pipClicks)
-            assertEquals(1, speedFocusToggles)
+            assertEquals(1, displayCycles)
         }
     }
 
     @Test
     fun threeDigitSpeedAndUnitFitOnNarrowPortrait() {
         composeRule.setContent {
-            Box(modifier = Modifier.size(320.dp, 600.dp)) {
-                SpeedometerScreen(
-                    state = SpeedometerState(
-                        currentSpeedKmh = 100f,
-                        estimateQuality = EstimateQuality.TRACKING,
-                        satelliteCount = 6
-                    ),
-                    error = null,
-                    warning = null,
-                    signalMessage = null,
-                    isInPipMode = false,
-                    speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
-                    trackingMode = TrackingMode.HANDHELD,
-                    refreshRate = RefreshRate.ONE_SECOND,
-                    trackingModeEnabled = true,
-                    supportsPip = false,
-                    permissionMessage = null,
-                    permissionCanRequest = false,
-                    onSpeedUnitClick = {},
-                    onTrackingModeChange = {},
-                    onRefreshRateChange = {},
-                    onReset = {},
-                    onRetry = {},
-                    onEnterPip = {},
-                    onRequestPermission = {},
-                    onOpenSettings = {}
-                )
+            val density = LocalDensity.current
+            CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale = 1f)) {
+                Box(modifier = Modifier.size(320.dp, 600.dp)) {
+                    SpeedometerScreen(
+                        state = SpeedometerState(
+                            currentSpeedKmh = 100f,
+                            estimateQuality = EstimateQuality.TRACKING,
+                            satelliteCount = 6
+                        ),
+                        error = null,
+                        warning = null,
+                        signalMessage = null,
+                        isInPipMode = false,
+                        speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
+                        trackingMode = TrackingMode.HANDHELD,
+                        refreshRate = RefreshRate.ONE_SECOND,
+                        trackingModeEnabled = true,
+                        supportsPip = false,
+                        permissionMessage = null,
+                        permissionCanRequest = false,
+                        onSpeedUnitClick = {},
+                        onTrackingModeChange = {},
+                        onRefreshRateChange = {},
+                        onReset = {},
+                        onRetry = {},
+                        onEnterPip = {},
+                        onRequestPermission = {},
+                        onOpenSettings = {}
+                    )
+                }
             }
         }
 
@@ -158,7 +169,8 @@ class SpeedometerScreenTest {
                     satelliteCount = 6,
                     maxSatelliteCount = 8,
                     currentPosition = current,
-                    positionTrail = listOf(current)
+                    positionTrail = listOf(current),
+                    portraitDisplayMode = PortraitDisplayMode.SPEED_FOCUS
                 ),
                 error = null,
                 warning = null,
@@ -178,8 +190,7 @@ class SpeedometerScreenTest {
                 onRetry = {},
                 onEnterPip = {},
                 onRequestPermission = {},
-                onOpenSettings = {},
-                isSpeedFocusMode = true
+                onOpenSettings = {}
             )
         }
 
@@ -226,8 +237,7 @@ class SpeedometerScreenTest {
                     onRetry = {},
                     onEnterPip = {},
                     onRequestPermission = {},
-                    onOpenSettings = {},
-                    isSpeedFocusMode = false
+                    onOpenSettings = {}
                 )
             }
         }
@@ -239,6 +249,48 @@ class SpeedometerScreenTest {
         composeRule.onNodeWithText("v${BuildConfig.VERSION_NAME}").assertDoesNotExist()
         composeRule.onNodeWithText("top speed: ").assertDoesNotExist()
         composeRule.onNodeWithText("reset").assertDoesNotExist()
+    }
+
+    @Test
+    fun landscapeTemporarilyOverridesSelectedRegattaDisplay() {
+        composeRule.setContent {
+            Box(modifier = Modifier.size(800.dp, 400.dp)) {
+                SpeedometerScreen(
+                    state = SpeedometerState(
+                        currentSpeedKmh = 72f,
+                        estimateQuality = EstimateQuality.TRACKING,
+                        portraitDisplayMode = PortraitDisplayMode.REGATTA,
+                        vesselHeading = VesselHeading(5f, 2f, 1L),
+                        regattaMetrics = RegattaMetrics(12.0, 3.0)
+                    ),
+                    error = null,
+                    warning = null,
+                    signalMessage = null,
+                    isInPipMode = false,
+                    speedUnit = SpeedUnit.MILES_PER_HOUR,
+                    trackingMode = TrackingMode.HANDHELD,
+                    refreshRate = RefreshRate.ONE_SECOND,
+                    trackingModeEnabled = true,
+                    supportsPip = true,
+                    permissionMessage = null,
+                    permissionCanRequest = false,
+                    onSpeedUnitClick = {},
+                    onTrackingModeChange = {},
+                    onRefreshRateChange = {},
+                    onReset = {},
+                    onRetry = {},
+                    onEnterPip = {},
+                    onRequestPermission = {},
+                    onOpenSettings = {}
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("mph").assertIsDisplayed()
+        composeRule.onNodeWithText("kts").assertDoesNotExist()
+        composeRule.onNodeWithText("005").assertDoesNotExist()
+        composeRule.onNodeWithText("DTL").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("Pin line point").assertDoesNotExist()
     }
 
     @Test
@@ -303,6 +355,122 @@ class SpeedometerScreenTest {
             .assertIsDisplayed()
         composeRule.onNodeWithText("-- m").assertIsDisplayed()
         composeRule.onNodeWithText("045\u00b0 NE").assertDoesNotExist()
+    }
+
+    @Test
+    fun regattaDisplayUsesFixedKnotsMetricsAndPointGestures() {
+        var pinCaptures = 0
+        var pinClears = 0
+        var boatCaptures = 0
+        var boatClears = 0
+        var displayCycles = 0
+        var screenState by mutableStateOf(
+            SpeedometerState(
+                currentSpeedKmh = 18.52f,
+                speedAccuracyKmh = 1.852f,
+                estimateQuality = EstimateQuality.TRACKING,
+                satelliteCount = 7,
+                portraitDisplayMode = PortraitDisplayMode.REGATTA,
+                vesselHeading = VesselHeading(5f, 3f, 1L),
+                pinMark = RegattaMark(51.0, 4.0, 3f),
+                regattaMetrics = RegattaMetrics(12.2, 18.4)
+            )
+        )
+        composeRule.setContent {
+            Box(modifier = Modifier.size(360.dp, 760.dp)) {
+                SpeedometerScreen(
+                    state = screenState,
+                    error = null,
+                    warning = null,
+                    signalMessage = null,
+                    isInPipMode = false,
+                    speedUnit = SpeedUnit.MILES_PER_HOUR,
+                    trackingMode = TrackingMode.HANDHELD,
+                    refreshRate = RefreshRate.ONE_SECOND,
+                    trackingModeEnabled = true,
+                    supportsPip = true,
+                    permissionMessage = null,
+                    permissionCanRequest = false,
+                    onSpeedUnitClick = {},
+                    onTrackingModeChange = {},
+                    onRefreshRateChange = {},
+                    onReset = {},
+                    onRetry = {},
+                    onEnterPip = {},
+                    onRequestPermission = {},
+                    onOpenSettings = {},
+                    onPortraitDisplayCycle = { displayCycles++ },
+                    onPinMarkCapture = {
+                        pinCaptures++
+                        screenState = screenState.copy(pinMark = RegattaMark(51.0, 4.0, 3f))
+                    },
+                    onBoatMarkCapture = {
+                        boatCaptures++
+                        screenState = screenState.copy(boatMark = RegattaMark(51.0, 4.001, 3f))
+                    },
+                    onPinMarkClear = {
+                        pinClears++
+                        screenState = screenState.copy(pinMark = null)
+                    },
+                    onBoatMarkClear = {
+                        boatClears++
+                        screenState = screenState.copy(boatMark = null)
+                    }
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("v${BuildConfig.VERSION_NAME}").assertDoesNotExist()
+        composeRule.onNodeWithText("005").assertIsDisplayed()
+        composeRule.onNodeWithText("deg").assertIsDisplayed()
+        composeRule.onNodeWithText("10").assertIsDisplayed()
+        composeRule.onNodeWithText(".00").assertIsDisplayed()
+        composeRule.onNodeWithText("kts").assertIsDisplayed()
+        composeRule.onNodeWithText("\u00b1 1.0 kts").assertDoesNotExist()
+        composeRule.onNodeWithText("DTL").assertIsDisplayed()
+        composeRule.onNodeWithText("12 m").assertIsDisplayed()
+        composeRule.onNodeWithText("TTL").assertIsDisplayed()
+        composeRule.onNodeWithText("18 s").assertIsDisplayed()
+        composeRule.onNodeWithText("top speed: ").assertDoesNotExist()
+        composeRule.onNodeWithText("reset").assertDoesNotExist()
+        composeRule.onNodeWithText("float").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("North-up position trail").assertDoesNotExist()
+        val headingBounds = composeRule.onNodeWithText("005").fetchSemanticsNode().boundsInRoot
+        val speedBounds = composeRule.onNodeWithText("10").fetchSemanticsNode().boundsInRoot
+        val metricsBounds = composeRule.onNodeWithContentDescription("DTL 12 m")
+            .fetchSemanticsNode().boundsInRoot
+        assertTrue(kotlin.math.abs(headingBounds.height - speedBounds.height) <= 1f)
+        val headingToSpeed = speedBounds.center.y - headingBounds.center.y
+        val speedToMetrics = metricsBounds.center.y - speedBounds.center.y
+        val spacingTolerance = with(composeRule.density) { 24.dp.toPx() }
+        assertTrue(
+            "Uneven regatta spacing: heading-to-speed centers=$headingToSpeed, " +
+                "speed-to-metrics centers=$speedToMetrics",
+            kotlin.math.abs(headingToSpeed - speedToMetrics) <= spacingTolerance
+        )
+        composeRule.onNodeWithContentDescription("True heading display")
+            .performTouchInput { doubleClick() }
+
+        val pin = composeRule.onNodeWithContentDescription("Pin line point")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "set"))
+        val boat = composeRule.onNodeWithContentDescription("Boat line point")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "not set"))
+        pin.performTouchInput { click() }
+        composeRule.mainClock.advanceTimeBy(500)
+        boat.performTouchInput { click() }
+        composeRule.mainClock.advanceTimeBy(500)
+        composeRule.waitForIdle()
+        boat.assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "set"))
+        pin.performTouchInput { doubleClick() }
+        boat.performTouchInput { doubleClick() }
+
+        composeRule.runOnIdle {
+            assertEquals(0, pinCaptures)
+            assertEquals(1, pinClears)
+            assertEquals(1, boatCaptures)
+            assertEquals(1, boatClears)
+            assertEquals(1, displayCycles)
+        }
     }
 
     @Test
@@ -458,6 +626,42 @@ class SpeedometerScreenTest {
         composeRule.onNodeWithText("gps provider disabled").assertIsDisplayed()
         composeRule.onNodeWithText("--").assertIsDisplayed()
         composeRule.onNodeWithText("reset").assertIsDisplayed()
+    }
+
+    @Test
+    fun providerDisabledUsesInlineStatusOnRegattaHud() {
+        composeRule.setContent {
+            SpeedometerScreen(
+                state = SpeedometerState(
+                    currentSpeedKmh = 72f,
+                    estimateQuality = EstimateQuality.TRACKING,
+                    portraitDisplayMode = PortraitDisplayMode.REGATTA
+                ),
+                error = null,
+                warning = null,
+                signalMessage = "gps provider disabled",
+                isInPipMode = false,
+                speedUnit = SpeedUnit.KILOMETERS_PER_HOUR,
+                trackingMode = TrackingMode.HANDHELD,
+                refreshRate = RefreshRate.ONE_SECOND,
+                trackingModeEnabled = true,
+                supportsPip = false,
+                permissionMessage = null,
+                permissionCanRequest = false,
+                onSpeedUnitClick = {},
+                onTrackingModeChange = {},
+                onRefreshRateChange = {},
+                onReset = {},
+                onRetry = {},
+                onEnterPip = {},
+                onRequestPermission = {},
+                onOpenSettings = {}
+            )
+        }
+
+        composeRule.onNodeWithText("gps provider disabled").assertIsDisplayed()
+        composeRule.onNodeWithText("kts").assertIsDisplayed()
+        composeRule.onNodeWithText("reset").assertDoesNotExist()
     }
 
     @Test

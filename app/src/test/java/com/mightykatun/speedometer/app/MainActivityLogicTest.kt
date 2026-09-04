@@ -23,4 +23,16 @@ class MainActivityLogicTest {
             locationPermissionIssue(preciseRequired = true, canRequest = false)
         )
     }
+
+    @Test
+    fun `regatta values use fixed-width heading and whole SI metrics`() {
+        assertEquals("005", formattedRegattaHeading(5f))
+        assertEquals("000", formattedRegattaHeading(359.6f))
+        assertEquals("--", formattedRegattaHeading(Float.NaN))
+        assertEquals("24 m", formattedDistanceToLine(23.6))
+        assertEquals("-3 m", formattedDistanceToLine(-3.2))
+        assertEquals("-- m", formattedDistanceToLine(null))
+        assertEquals("18 s", formattedTimeToLine(18.4))
+        assertEquals("-- s", formattedTimeToLine(-1.0))
+    }
 }

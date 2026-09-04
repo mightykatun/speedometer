@@ -45,7 +45,7 @@ internal fun PositionTrailMap(
     onDoubleTap: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val heading = current.headingDegrees
+    val heading = current.courseOverGroundDegrees
     val headingText = heading?.let(::headingLabel)
     val altitudeText = current.altitudeMeters?.let(::altitudeLabel)
     val currentOnDoubleTap by rememberUpdatedState(onDoubleTap)

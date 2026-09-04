@@ -3,6 +3,7 @@ package com.mightykatun.speedometer.app.data.repository
 import com.mightykatun.speedometer.app.domain.model.SpeedEstimate
 import com.mightykatun.speedometer.app.domain.model.PositionFix
 import com.mightykatun.speedometer.app.domain.model.TrackingMode
+import com.mightykatun.speedometer.app.domain.model.VesselHeading
 
 data class TrackingModeResult(
     val commandId: Long,
@@ -23,6 +24,7 @@ interface SpeedRepository {
         onEstimate: (SpeedEstimate) -> Unit,
         onSatelliteCount: (Int) -> Unit,
         onPositionFix: (PositionFix) -> Unit,
+        onVesselHeading: (VesselHeading?) -> Unit,
         onGpsProviderEnabled: () -> Unit,
         onGpsRecoveryAccepted: () -> Unit,
         onPermissionRequired: () -> Unit,
