@@ -7,6 +7,7 @@ A high-contrast, privacy-first Android speedometer and sailing start-line dashbo
 ## Preview
 
 <p align="center">
+  <img src="screenshots/main-preview.png" width="240" alt="Main display"/>
   <img src="screenshots/app-preview-portrait.png" width="240" alt="Regatta display" />
   <img src="screenshots/app-preview-landscape.png" width="480" alt="Landscape speed display" />
 </p>
